@@ -52,7 +52,10 @@ struct Config {
   int threads{defaultWorkerCount()};
   NestingAlgorithm algorithm{NestingAlgorithm::Nfp};
   double bitmapResolutionMm{1.0};
+  int bitmapSearchStepPx{1};
   bool bitmapPreferAvx2{true};
+  bool bitmapValidateGeometry{true};
+  bool debugPlacement{false};
   double spacing{0.0};
   bool simplify{false};
   std::string placementType{"gravity"};

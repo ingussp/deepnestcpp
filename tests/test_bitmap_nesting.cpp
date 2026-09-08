@@ -46,6 +46,9 @@ TEST_CASE("bitmap scalar placement works on small fixture") {
   REQUIRE(result.placements.size() == 1);
   REQUIRE(result.placements.front().sheetplacements.size() == parts.size());
   REQUIRE(stats.simdBackend == "scalar");
+  REQUIRE(stats.processedParts == parts.size());
+  REQUIRE(stats.placedParts == parts.size());
+  REQUIRE(stats.unplacedParts == 0);
 }
 
 TEST_CASE("bitmap placements are inside sheet and non-overlapping") {
@@ -59,6 +62,7 @@ TEST_CASE("bitmap placements are inside sheet and non-overlapping") {
   auto parts = std::vector<Polygon>{rect(0, 0, 4, 3, "p1", 1), rect(0, 0, 4, 3, "p2", 2), rect(0, 0, 3, 2, "p3", 3)};
   const auto result = placePartsBitmap({sheet}, parts, cfg);
   REQUIRE(result.unplaced.empty());
+  REQUIRE(result.placements.size() == 1);
 
   std::vector<Polygon> absolute;
   for (const auto& placement : result.placements.front().sheetplacements) {
@@ -100,6 +104,60 @@ TEST_CASE("bitmap reuses identical masks and returns valid placements") {
   REQUIRE_FALSE(result.placements.empty());
   REQUIRE_FALSE(result.placements.front().sheetplacements.empty());
   REQUIRE(stats.cachedMaskCount == 1);
+}
+
+TEST_CASE("bitmap stats record every processed part in debug mode") {
+  Config cfg;
+  cfg.algorithm = NestingAlgorithm::Bitmap;
+  cfg.bitmapResolutionMm = 1.0;
+  cfg.bitmapPreferAvx2 = false;
+  cfg.rotations = 1;
+  cfg.debugPlacement = true;
+
+  Polygon sheet = rect(0, 0, 10, 10, "sheet", 100);
+  auto parts = std::vector<Polygon>{rect(0, 0, 6, 6, "p1", 1), rect(0, 0, 6, 6, "p2", 2), rect(0, 0, 6, 6, "p3", 3)};
+  BitmapNestingStats stats;
+  const auto result = placePartsBitmap({sheet}, parts, cfg, &stats);
+
+  REQUIRE(stats.processedParts == parts.size());
+  REQUIRE(stats.perPart.size() == parts.size());
+  REQUIRE(stats.placedParts + stats.unplacedParts == stats.processedParts);
+  REQUIRE(result.unplaced.size() == stats.unplacedParts);
+  for (size_t i = 0; i < stats.perPart.size(); ++i) {
+    REQUIRE(stats.perPart[i].processedPart == i + 1);
+    REQUIRE(stats.perPart[i].candidatesExamined > 0);
+  }
+}
+
+TEST_CASE("bitmap occupancy path agrees with accepted-placement geometry validation on small fixture") {
+  Config validateCfg;
+  validateCfg.algorithm = NestingAlgorithm::Bitmap;
+  validateCfg.bitmapResolutionMm = 1.0;
+  validateCfg.bitmapPreferAvx2 = false;
+  validateCfg.rotations = 1;
+  validateCfg.bitmapValidateGeometry = true;
+
+  Config fastCfg = validateCfg;
+  fastCfg.bitmapValidateGeometry = false;
+
+  Polygon sheet = rect(0, 0, 18, 10, "sheet", 100);
+  auto parts = std::vector<Polygon>{rect(0, 0, 4, 4, "a", 1), rect(0, 0, 3, 3, "b", 2), rect(0, 0, 2, 2, "c", 3)};
+
+  const auto validated = placePartsBitmap({sheet}, parts, validateCfg);
+  const auto occupancyOnly = placePartsBitmap({sheet}, parts, fastCfg);
+
+  REQUIRE(validated.unplaced.size() == occupancyOnly.unplaced.size());
+  REQUIRE(validated.placements.size() == occupancyOnly.placements.size());
+  REQUIRE(validated.placements.front().sheetplacements.size() ==
+          occupancyOnly.placements.front().sheetplacements.size());
+  for (size_t i = 0; i < validated.placements.front().sheetplacements.size(); ++i) {
+    const auto& a = validated.placements.front().sheetplacements[i];
+    const auto& b = occupancyOnly.placements.front().sheetplacements[i];
+    REQUIRE(a.id == b.id);
+    REQUIRE(a.rotation == b.rotation);
+    REQUIRE(a.x == b.x);
+    REQUIRE(a.y == b.y);
+  }
 }
 
 TEST_CASE("bitmap scalar and AVX2 paths are equivalent when AVX2 is supported") {

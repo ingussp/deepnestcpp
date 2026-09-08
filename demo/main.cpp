@@ -81,7 +81,8 @@ int main(int argc, char** argv) {
     args.emplace_back(argv[i]);
   }
 
-  DemoCliOptions options{kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, std::nullopt, false};
+  DemoCliOptions options{
+      kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, 1, false, std::nullopt, false};
   try {
     options = parseDemoCliOptions(args);
   } catch (const std::exception& ex) {
@@ -91,13 +92,16 @@ int main(int argc, char** argv) {
 
   if (options.showHelp) {
     std::cout << "Usage: deepnestcpp_demo [--count <N>] [--threads <N>] [--algorithm nfp|bitmap]\n"
-                 "                        [--bitmap-resolution <mm-per-pixel>] [--output <path>] [--help]\n"
+                 "                        [--bitmap-resolution <mm-per-pixel>] [--bitmap-step <px>]\n"
+                 "                        [--debug-placement] [--output <path>] [--help]\n"
               << "  --count <N>     Number of identical star parts to generate (default "
               << kDefaultDemoPartCount << ")\n"
               << "  --threads <N>   Worker count for independent NFP precompute (default "
               << defaultWorkerCount() << ")\n"
               << "  --algorithm     Nesting algorithm: nfp or bitmap (default nfp)\n"
               << "  --bitmap-resolution <mm-per-pixel> Raster resolution for bitmap nesting (default 1.0)\n"
+              << "  --bitmap-step <px> Bitmap candidate search step in pixels (default 1)\n"
+              << "  --debug-placement Print per-part bitmap debug/progress lines\n"
               << "  --output <path> Export placed parts and the 1500x1500 mm sheet to DXF\n";
     return 0;
   }
@@ -109,6 +113,8 @@ int main(int argc, char** argv) {
   req.config.threads = options.threads;
   req.config.algorithm = options.algorithm;
   req.config.bitmapResolutionMm = options.bitmapResolutionMm;
+  req.config.bitmapSearchStepPx = options.bitmapSearchStepPx;
+  req.config.debugPlacement = options.debugPlacement;
   req.individual.placement = makeDemoStarParts(options.count);
   req.individual.rotation.assign(req.individual.placement.size(), 0.0);
   req.ids.reserve(req.individual.placement.size());
@@ -161,7 +167,13 @@ int main(int argc, char** argv) {
   StdoutSink sink;
   sink.setWorkerCount(req.config.threads);
   BackgroundOrchestrator orchestrator;
-  auto runStats = orchestrator.runWithStats(req, sink);
+  OrchestratorRunStats runStats;
+  try {
+    runStats = orchestrator.runWithStats(req, sink);
+  } catch (const std::exception& ex) {
+    std::cerr << ex.what() << "\n";
+    return 1;
+  }
   auto& result = runStats.placement;
 
   if (options.outputPath.has_value()) {
@@ -184,11 +196,23 @@ int main(int argc, char** argv) {
   std::cout << "part count: " << options.count << "\n";
   std::cout << "workers: " << options.threads << "\n";
   std::cout << "bitmap resolution: " << options.bitmapResolutionMm << " mm/pixel\n";
+  std::cout << "bitmap search step: " << options.bitmapSearchStepPx << " px\n";
   std::cout << "bitmap SIMD backend: " << runStats.simdBackend << "\n";
   std::cout << "placed parts: " << placedCount << "\n";
   std::cout << "unplaced parts: " << result.unplaced.size() << "\n";
   std::cout << "placed sheets: " << result.placements.size() << "\n";
   std::cout << "utilisation: " << result.utilisation << "%\n";
+  if (options.algorithm == NestingAlgorithm::Bitmap) {
+    std::cout << "bitmap summary: processed=" << runStats.bitmapStats.processedParts
+              << " placed=" << runStats.bitmapStats.placedParts
+              << " unplaced=" << runStats.bitmapStats.unplacedParts
+              << " candidates=" << runStats.bitmapStats.candidatesExamined
+              << " boundary_rejects=" << runStats.bitmapStats.boundaryRejects
+              << " bitmap_collision_rejects=" << runStats.bitmapStats.bitmapCollisionRejects
+              << " vector_rejects=" << runStats.bitmapStats.vectorValidationRejects
+              << " mask_cache=" << runStats.bitmapStats.cachedMaskCount
+              << " simd=" << runStats.bitmapStats.simdBackend << "\n";
+  }
   printTimingLine("timing.setup", runStats.timings.setupMs);
   printTimingLine("timing.nfp_precompute", runStats.timings.nfpPrecomputeMs);
   printTimingLine("timing.placement", runStats.timings.placementMs);

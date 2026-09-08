@@ -1,5 +1,6 @@
 #pragma once
 
+#include "deepnestcpp/bitmap_nesting.hpp"
 #include "deepnestcpp/model.hpp"
 #include "deepnestcpp/nfp_cache.hpp"
 
@@ -54,6 +55,7 @@ struct OrchestratorRunStats {
   PlacementResult placement;
   NestingTimings timings;
   std::string simdBackend{"n/a"};
+  BitmapNestingStats bitmapStats;
 };
 
 class BackgroundOrchestrator {

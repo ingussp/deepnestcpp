@@ -3,8 +3,11 @@
 #include "deepnestcpp/geometry.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -244,23 +247,32 @@ BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bou
   return material;
 }
 
-std::vector<uint64_t> shiftedMaskRow(const RasterMask& mask, int row, int bitOffset, size_t outWords) {
-  std::vector<uint64_t> out(outWords, 0ULL);
-  const uint64_t* src = &mask.bits[static_cast<size_t>(row) * mask.wordsPerRow];
-  if (bitOffset == 0) {
-    std::copy(src, src + std::min(mask.wordsPerRow, outWords), out.begin());
-    return out;
-  }
-  for (size_t i = 0; i < mask.wordsPerRow; ++i) {
-    const size_t dst = i;
-    if (dst < outWords) {
-      out[dst] |= src[i] << bitOffset;
+uint64_t shiftedMaskWord(const uint64_t* src, size_t srcWords, size_t wordIndex, int bitShift) {
+  const uint64_t lo = wordIndex < srcWords ? src[wordIndex] : 0ULL;
+  const uint64_t hi = (wordIndex + 1) < srcWords ? src[wordIndex + 1] : 0ULL;
+  return (lo << bitShift) | (hi >> (64 - bitShift));
+}
+
+bool rowsCollideAndInBoundsShiftedScalar(const uint64_t* occ,
+                                         const uint64_t* material,
+                                         const uint64_t* maskRow,
+                                         size_t maskWords,
+                                         int bitShift) {
+  const size_t shiftedWords = maskWords + 1;
+  for (size_t i = 0; i < shiftedWords; ++i) {
+    const uint64_t shiftedWord = shiftedMaskWord(maskRow, maskWords, i, bitShift);
+    if ((shiftedWord & occ[i]) != 0ULL || (shiftedWord & ~material[i]) != 0ULL) {
+      return true;
     }
-    if (bitOffset != 0 && (dst + 1) < outWords) {
-      out[dst + 1] |= src[i] >> (64 - bitOffset);
-    }
   }
-  return out;
+  return false;
+}
+
+void rowsOrShiftedScalar(uint64_t* occ, const uint64_t* maskRow, size_t maskWords, int bitShift) {
+  const size_t shiftedWords = maskWords + 1;
+  for (size_t i = 0; i < shiftedWords; ++i) {
+    occ[i] |= shiftedMaskWord(maskRow, maskWords, i, bitShift);
+  }
 }
 
 bool maskFits(const BitmapGrid& occupancy,
@@ -301,8 +313,8 @@ bool maskFits(const BitmapGrid& occupancy,
         }
       }
     } else {
-      const auto shifted = shiftedMaskRow(mask, row, bitShift, neededWords);
-      if (rowsCollideAndInBoundsScalar(occRow, matRow, shifted.data(), neededWords)) {
+      const uint64_t* maskRow = &mask.bits[static_cast<size_t>(row) * mask.wordsPerRow];
+      if (rowsCollideAndInBoundsShiftedScalar(occRow, matRow, maskRow, mask.wordsPerRow, bitShift)) {
         return false;
       }
     }
@@ -313,7 +325,6 @@ bool maskFits(const BitmapGrid& occupancy,
 void applyMask(BitmapGrid& occupancy, const RasterMask& mask, int originX, int originY, bool useAvx2) {
   const int wordShift = originX / 64;
   const int bitShift = originX % 64;
-  const size_t neededWords = mask.wordsPerRow + (bitShift == 0 ? 0 : 1);
 
   for (int row = 0; row < mask.heightPx; ++row) {
     uint64_t* occRow = rowBits(occupancy, originY + row) + wordShift;
@@ -328,8 +339,8 @@ void applyMask(BitmapGrid& occupancy, const RasterMask& mask, int originX, int o
         rowsOrScalar(occRow, maskRow, mask.wordsPerRow);
       }
     } else {
-      const auto shifted = shiftedMaskRow(mask, row, bitShift, neededWords);
-      rowsOrScalar(occRow, shifted.data(), neededWords);
+      const uint64_t* maskRow = &mask.bits[static_cast<size_t>(row) * mask.wordsPerRow];
+      rowsOrShiftedScalar(occRow, maskRow, mask.wordsPerRow, bitShift);
     }
   }
 }
@@ -342,7 +353,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               const std::vector<Polygon>& parts,
                                               const Config& config,
                                               bool useAvx2,
-                                              size_t& cachedMaskCount) {
+                                              BitmapNestingStats* stats) {
   PlacementResult out;
   out.totalarea = polygonMaterialArea(sheet);
 
@@ -353,11 +364,16 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   std::unordered_map<std::string, RasterMask> maskCache;
   std::vector<Polygon> placedAbsolute;
   std::vector<Placement> placements;
+  size_t placedCount = 0;
+  size_t unplacedCount = 0;
+  const size_t totalParts = parts.size();
+  const int searchStep = std::max(1, config.bitmapSearchStepPx);
+  constexpr size_t kPeriodicSearchProgressCandidates = 200000;
+  BitmapNestingStats localStats;
 
-  std::vector<Polygon> remaining = parts;
-  while (!remaining.empty()) {
-    Polygon part = remaining.front();
-    remaining.erase(remaining.begin());
+  for (size_t partIndex = 0; partIndex < parts.size(); ++partIndex) {
+    const Polygon& part = parts[partIndex];
+    const auto partStart = std::chrono::steady_clock::now();
 
     const int rotationCount = std::max(1, config.rotations);
     const double rotationStep = 360.0 / static_cast<double>(rotationCount);
@@ -377,14 +393,21 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     const RasterMask* acceptedMask = nullptr;
     int acceptedX = 0;
     int acceptedY = 0;
+    size_t partCandidatesExamined = 0;
+    size_t partBoundaryRejects = 0;
+    size_t partBitmapCollisionRejects = 0;
+    size_t partVectorValidationRejects = 0;
     bool placed = false;
-    for (int x = 0; !placed && x < material.widthPx; ++x) {
-      for (int y = 0; !placed && y < material.heightPx; ++y) {
+    for (int x = 0; !placed && x < material.widthPx; x += searchStep) {
+      for (int y = 0; !placed && y < material.heightPx; y += searchStep) {
         for (const RasterMask* mask : rotationMasks) {
+          ++partCandidatesExamined;
           if (x + mask->widthPx > material.widthPx || y + mask->heightPx > material.heightPx) {
+            ++partBoundaryRejects;
             continue;
           }
           if (!maskFits(occupancy, material, *mask, x, y, useAvx2)) {
+            ++partBitmapCollisionRejects;
             continue;
           }
 
@@ -393,40 +416,78 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           const double shiftX = worldMaskMinX - mask->minX;
           const double shiftY = worldMaskMinY - mask->minY;
 
-          Placement candidate;
-          candidate.x = shiftX;
-          candidate.y = shiftY;
-          candidate.id = part.id;
-          candidate.rotation = mask->rotationDeg;
-          candidate.source = part.source;
-          candidate.filename = part.filename;
-
-          Polygon absolute = shiftPolygon(mask->rotatedPart, {shiftX, shiftY, true});
-          if (hasMaterialOutsideSheet(absolute, sheet, config)) {
-            continue;
-          }
-          bool overlap = false;
-          for (const auto& already : placedAbsolute) {
-            if (hasMaterialOverlap(absolute, already, config)) {
-              overlap = true;
-              break;
+          if (config.bitmapValidateGeometry) {
+            Polygon absolute = shiftPolygon(mask->rotatedPart, {shiftX, shiftY, true});
+            if (hasMaterialOutsideSheet(absolute, sheet, config)) {
+              ++partVectorValidationRejects;
+              continue;
+            }
+            bool overlap = false;
+            for (const auto& already : placedAbsolute) {
+              if (hasMaterialOverlap(absolute, already, config)) {
+                overlap = true;
+                break;
+              }
+            }
+            if (overlap) {
+              ++partVectorValidationRejects;
+              continue;
             }
           }
-          if (overlap) {
-            continue;
-          }
-          acceptedPlacement = candidate;
+          acceptedPlacement = Placement{
+              shiftX, shiftY, part.id, mask->rotationDeg, part.source, part.filename, 0.0, {}};
           acceptedMask = mask;
           acceptedX = x;
           acceptedY = y;
           placed = true;
           break;
         }
+        if (config.debugPlacement && !placed &&
+            partCandidatesExamined > 0 &&
+            (partCandidatesExamined % kPeriodicSearchProgressCandidates) == 0) {
+          std::cout << "bitmap part=" << (partIndex + 1) << "/" << totalParts
+                    << " placed=" << placedCount
+                    << " unplaced=" << unplacedCount
+                    << " state=searching candidates=" << partCandidatesExamined
+                    << " boundary_rejects=" << partBoundaryRejects
+                    << " bitmap_collision_rejects=" << partBitmapCollisionRejects
+                    << " vector_rejects=" << partVectorValidationRejects << "\n"
+                    << std::flush;
+        }
       }
     }
 
     if (!acceptedPlacement.has_value() || acceptedMask == nullptr) {
       out.unplaced.push_back(part);
+      ++unplacedCount;
+      localStats.unplacedParts++;
+      localStats.processedParts++;
+      localStats.candidatesExamined += partCandidatesExamined;
+      localStats.boundaryRejects += partBoundaryRejects;
+      localStats.bitmapCollisionRejects += partBitmapCollisionRejects;
+      localStats.vectorValidationRejects += partVectorValidationRejects;
+      const double elapsedMs =
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
+      localStats.perPart.push_back(BitmapNestingStats::PartStats{
+          partIndex + 1,
+          false,
+          elapsedMs,
+          partCandidatesExamined,
+          partBoundaryRejects,
+          partBitmapCollisionRejects,
+          partVectorValidationRejects});
+      if (config.debugPlacement) {
+        std::cout << std::fixed << std::setprecision(3)
+                  << "bitmap part=" << (partIndex + 1) << "/" << totalParts
+                  << " placed=" << placedCount
+                  << " unplaced=" << unplacedCount
+                  << " status=unplaced part_ms=" << elapsedMs
+                  << " candidates=" << partCandidatesExamined
+                  << " boundary_rejects=" << partBoundaryRejects
+                  << " bitmap_collision_rejects=" << partBitmapCollisionRejects
+                  << " vector_rejects=" << partVectorValidationRejects << "\n"
+                  << std::flush;
+      }
       continue;
     }
 
@@ -435,9 +496,42 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     Polygon placedPolygon = shiftPolygon(acceptedMask->rotatedPart, {acceptedPlacement->x, acceptedPlacement->y, true});
     placedAbsolute.push_back(placedPolygon);
     out.area += polygonMaterialArea(placedPolygon);
+    ++placedCount;
+    localStats.placedParts++;
+    localStats.processedParts++;
+    localStats.candidatesExamined += partCandidatesExamined;
+    localStats.boundaryRejects += partBoundaryRejects;
+    localStats.bitmapCollisionRejects += partBitmapCollisionRejects;
+    localStats.vectorValidationRejects += partVectorValidationRejects;
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
+    localStats.perPart.push_back(BitmapNestingStats::PartStats{
+        partIndex + 1,
+        true,
+        elapsedMs,
+        partCandidatesExamined,
+        partBoundaryRejects,
+        partBitmapCollisionRejects,
+        partVectorValidationRejects});
+    if (config.debugPlacement) {
+      std::cout << std::fixed << std::setprecision(3)
+                << "bitmap part=" << (partIndex + 1) << "/" << totalParts
+                << " placed=" << placedCount
+                << " unplaced=" << unplacedCount
+                << " status=placed part_ms=" << elapsedMs
+                << " candidates=" << partCandidatesExamined
+                << " boundary_rejects=" << partBoundaryRejects
+                << " bitmap_collision_rejects=" << partBitmapCollisionRejects
+                << " vector_rejects=" << partVectorValidationRejects << "\n"
+                << std::flush;
+    }
   }
 
-  cachedMaskCount = maskCache.size();
+  localStats.cachedMaskCount = maskCache.size();
+  localStats.simdBackend = useAvx2 ? "avx2" : "scalar";
+  if (stats != nullptr) {
+    *stats = std::move(localStats);
+  }
   if (!placements.empty()) {
     out.placements.push_back(SheetPlacement{sheet.source, sheet.id, placements});
   }
@@ -463,6 +557,9 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   if (config.bitmapResolutionMm <= 0.0) {
     throw std::invalid_argument("--bitmap-resolution must be a positive number");
   }
+  if (config.bitmapSearchStepPx <= 0) {
+    throw std::invalid_argument("--bitmap-step must be a positive integer");
+  }
   if (sheets.empty()) {
     return {};
   }
@@ -474,11 +571,10 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
       false;
 #endif
 
-  size_t cachedMaskCount = 0;
-  PlacementResult result = placePartsBitmapOnSingleSheet(sheets.front(), parts, config, useAvx2, cachedMaskCount);
+  BitmapNestingStats localStats;
+  PlacementResult result = placePartsBitmapOnSingleSheet(sheets.front(), parts, config, useAvx2, &localStats);
   if (stats != nullptr) {
-    stats->simdBackend = useAvx2 ? "avx2" : "scalar";
-    stats->cachedMaskCount = cachedMaskCount;
+    *stats = localStats;
   }
   return result;
 }
