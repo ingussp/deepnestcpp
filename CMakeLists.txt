@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
+find_package(Threads REQUIRED)
 
 set(CLIPPER2_UTILS OFF CACHE BOOL "" FORCE)
 set(CLIPPER2_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -20,6 +21,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(clipper2)
 
 add_library(deepnestcpp
+  src/demo_cli.cpp
   src/demo_setup.cpp
   src/dxf_export.cpp
   src/geometry.cpp
@@ -34,7 +36,7 @@ target_include_directories(deepnestcpp
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-target_link_libraries(deepnestcpp PUBLIC Clipper2)
+target_link_libraries(deepnestcpp PUBLIC Clipper2 Threads::Threads)
 
 add_executable(deepnestcpp_demo demo/main.cpp)
 target_link_libraries(deepnestcpp_demo PRIVATE deepnestcpp)
@@ -49,6 +51,7 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(catch2)
 
   add_executable(deepnestcpp_tests
+    tests/test_demo_cli.cpp
     tests/test_demo_setup.cpp
     tests/test_dxf_export.cpp
     tests/test_geometry.cpp

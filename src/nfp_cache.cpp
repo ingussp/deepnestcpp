@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <functional>
+#include <shared_mutex>
 
 namespace deepnest {
 
@@ -27,7 +28,30 @@ std::size_t NfpKeyHash::operator()(const NfpKey& key) const {
   return (((h1 * 1315423911u) ^ h2) * 2654435761u) ^ h3 ^ (h4 << 1) ^ (h5 << 2);
 }
 
+NfpCache::NfpCache(const NfpCache& other) {
+  std::shared_lock lock(other.mutex_);
+  outer_ = other.outer_;
+  inner_ = other.inner_;
+  outerStoreCount_ = other.outerStoreCount_;
+  innerStoreCount_ = other.innerStoreCount_;
+}
+
+NfpCache& NfpCache::operator=(const NfpCache& other) {
+  if (this == &other) {
+    return *this;
+  }
+
+  std::shared_lock otherLock(other.mutex_);
+  std::unique_lock thisLock(mutex_);
+  outer_ = other.outer_;
+  inner_ = other.inner_;
+  outerStoreCount_ = other.outerStoreCount_;
+  innerStoreCount_ = other.innerStoreCount_;
+  return *this;
+}
+
 bool NfpCache::has(const NfpKey& key) const {
+  std::shared_lock lock(mutex_);
   if (key.inner) {
     return inner_.find(key) != inner_.end();
   }
@@ -35,6 +59,7 @@ bool NfpCache::has(const NfpKey& key) const {
 }
 
 std::optional<Polygon> NfpCache::findOuter(const NfpKey& key) const {
+  std::shared_lock lock(mutex_);
   auto it = outer_.find(key);
   if (it == outer_.end()) {
     return std::nullopt;
@@ -43,6 +68,7 @@ std::optional<Polygon> NfpCache::findOuter(const NfpKey& key) const {
 }
 
 std::optional<std::vector<Polygon>> NfpCache::findInner(const NfpKey& key) const {
+  std::shared_lock lock(mutex_);
   auto it = inner_.find(key);
   if (it == inner_.end()) {
     return std::nullopt;
@@ -51,20 +77,28 @@ std::optional<std::vector<Polygon>> NfpCache::findInner(const NfpKey& key) const
 }
 
 void NfpCache::insertOuter(const NfpKey& key, const Polygon& nfp) {
-  ++outerStoreCount_;
-  outer_[key] = nfp;
+  std::unique_lock lock(mutex_);
+  const auto [_, inserted] = outer_.try_emplace(key, nfp);
+  if (inserted) {
+    ++outerStoreCount_;
+  }
 }
 
 void NfpCache::insertInner(const NfpKey& key, const std::vector<Polygon>& nfp) {
-  ++innerStoreCount_;
-  inner_[key] = nfp;
+  std::unique_lock lock(mutex_);
+  const auto [_, inserted] = inner_.try_emplace(key, nfp);
+  if (inserted) {
+    ++innerStoreCount_;
+  }
 }
 
 size_t NfpCache::outerStoreCount() const {
+  std::shared_lock lock(mutex_);
   return outerStoreCount_;
 }
 
 size_t NfpCache::innerStoreCount() const {
+  std::shared_lock lock(mutex_);
   return innerStoreCount_;
 }
 

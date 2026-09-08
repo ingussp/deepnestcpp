@@ -1,29 +1,18 @@
+#include "deepnestcpp/demo_cli.hpp"
 #include "deepnestcpp/demo_setup.hpp"
 #include "deepnestcpp/dxf_export.hpp"
 #include "deepnestcpp/orchestrator.hpp"
 
-#include <exception>
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
-#include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace deepnest;
 
 namespace {
-
-int parsePositiveCount(const std::string& value) {
-  try {
-    const int count = std::stoi(value);
-    if (count <= 0) {
-      throw std::invalid_argument("non-positive");
-    }
-    return count;
-  } catch (const std::exception&) {
-    throw std::invalid_argument("--count must be a positive integer");
-  }
-}
 
 size_t countPlacedParts(const PlacementResult& result) {
   size_t placed = 0;
@@ -35,14 +24,30 @@ size_t countPlacedParts(const PlacementResult& result) {
 
 class StdoutSink : public EventSink {
  public:
+  void setWorkerCount(int workerCount) { workerCount_ = workerCount; }
+
   void onTestStart(const std::vector<Polygon>& sheets,
-                   const std::vector<Polygon>& parts,
-                   const Config&,
-                   int index) override {
+                  const std::vector<Polygon>& parts,
+                  const Config&,
+                  int index) override {
     std::cout << "start index=" << index << " sheets=" << sheets.size() << " parts=" << parts.size() << "\n";
+    std::cout << "workers=" << workerCount_ << "\n";
   }
 
   void onProgress(int index, double progress) override {
+    if (progress < 0.0) {
+      if (lastPercent_ != 100) {
+      std::cout << "progress index=" << index << " value=1\n";
+      lastPercent_ = 100;
+      }
+      return;
+    }
+
+    const int percent = std::clamp(static_cast<int>(progress * 100.0), 0, 100);
+    if (percent == lastPercent_) {
+      return;
+    }
+    lastPercent_ = percent;
     std::cout << "progress index=" << index << " value=" << progress << "\n";
   }
 
@@ -50,57 +55,45 @@ class StdoutSink : public EventSink {
     std::cout << "result fitness=" << result.fitness << " placements=" << result.placements.size()
               << " utilisation=" << result.utilisation << "%\n";
   }
+
+ private:
+  int workerCount_{1};
+  int lastPercent_{-1};
 };
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::optional<std::filesystem::path> outputPath;
-  int count = kDefaultDemoPartCount;
+  std::vector<std::string_view> args;
+  args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
   for (int i = 1; i < argc; ++i) {
-    const std::string arg = argv[i];
-    if (arg == "--help") {
-      std::cout << "Usage: deepnestcpp_demo [--count <N>] [--output <path>] [--help]\n"
-                << "  --count <N>   Number of identical star parts to generate (default "
-                << kDefaultDemoPartCount << ")\n"
-                << "  --output <path> Export placed parts and the 2000x2800 mm sheet to DXF\n";
-      return 0;
-    }
-    if (arg == "--count") {
-      if (i + 1 >= argc) {
-        std::cerr << "Missing value for --count\n";
-        return 1;
-      }
-      try {
-        count = parsePositiveCount(argv[++i]);
-      } catch (const std::exception& ex) {
-        std::cerr << ex.what() << "\n";
-        return 1;
-      }
-      continue;
-    }
-    if (arg == "--output") {
-      if (i + 1 >= argc) {
-        std::cerr << "Missing value for --output\n";
-        return 1;
-      }
-      if (outputPath.has_value()) {
-        std::cerr << "--output provided more than once\n";
-        return 1;
-      }
-      outputPath = std::filesystem::path(argv[++i]);
-      continue;
-    }
+    args.emplace_back(argv[i]);
+  }
 
-    std::cerr << "Unknown argument: " << arg << "\n";
+  DemoCliOptions options{kDefaultDemoPartCount, defaultWorkerCount(), std::nullopt, false};
+  try {
+    options = parseDemoCliOptions(args);
+  } catch (const std::exception& ex) {
+    std::cerr << ex.what() << "\n";
     return 1;
+  }
+
+  if (options.showHelp) {
+    std::cout << "Usage: deepnestcpp_demo [--count <N>] [--threads <N>] [--output <path>] [--help]\n"
+              << "  --count <N>     Number of identical star parts to generate (default "
+              << kDefaultDemoPartCount << ")\n"
+              << "  --threads <N>   Worker count for independent NFP precompute (default "
+              << defaultWorkerCount() << ")\n"
+              << "  --output <path> Export placed parts and the 2000x2800 mm sheet to DXF\n";
+    return 0;
   }
 
   BackgroundRequest req;
   req.index = 1;
   req.config.placementType = "box";
   req.config.rotations = 4;
-  req.individual.placement = makeDemoStarParts(count);
+  req.config.threads = options.threads;
+  req.individual.placement = makeDemoStarParts(options.count);
   req.individual.rotation.assign(req.individual.placement.size(), 0.0);
   req.ids.reserve(req.individual.placement.size());
   req.sources.reserve(req.individual.placement.size());
@@ -150,13 +143,14 @@ int main(int argc, char** argv) {
   }
 
   StdoutSink sink;
+  sink.setWorkerCount(req.config.threads);
   BackgroundOrchestrator orchestrator;
   auto result = orchestrator.run(req, sink);
 
-  if (outputPath.has_value()) {
+  if (options.outputPath.has_value()) {
     try {
-      exportPlacementResultToDxf(*outputPath, sourceSheets, sourceParts, result);
-      std::cout << "DXF exported to: " << std::filesystem::absolute(*outputPath).string() << "\n";
+      exportPlacementResultToDxf(*options.outputPath, sourceSheets, sourceParts, result);
+      std::cout << "DXF exported to: " << std::filesystem::absolute(*options.outputPath).string() << "\n";
     } catch (const std::exception& ex) {
       std::cerr << "Failed to export DXF: " << ex.what() << "\n";
       return 1;

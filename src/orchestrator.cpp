@@ -4,8 +4,65 @@
 #include "deepnestcpp/placement.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace deepnest {
+
+namespace {
+
+void precomputeMissingPairs(const std::vector<NfpPair>& pairs, const Config& config, NfpCache& cache, int requestedThreads) {
+  if (pairs.empty()) {
+    return;
+  }
+
+  const size_t workerCount =
+      std::min(pairs.size(), static_cast<size_t>(normalizeWorkerCount(requestedThreads)));
+  if (workerCount <= 1) {
+    for (const auto& pair : pairs) {
+      static_cast<void>(getOuterNfp(pair.A, pair.B, false, config, cache));
+    }
+    return;
+  }
+
+  std::atomic<size_t> nextIndex{0};
+  std::exception_ptr firstError;
+  std::mutex errorMutex;
+  std::vector<std::thread> workers;
+  workers.reserve(workerCount);
+
+  for (size_t worker = 0; worker < workerCount; ++worker) {
+    workers.emplace_back([&]() {
+      try {
+        while (true) {
+          const size_t pairIndex = nextIndex.fetch_add(1);
+          if (pairIndex >= pairs.size()) {
+            break;
+          }
+          static_cast<void>(getOuterNfp(pairs[pairIndex].A, pairs[pairIndex].B, false, config, cache));
+        }
+      } catch (...) {
+        std::lock_guard lock(errorMutex);
+        if (!firstError) {
+          firstError = std::current_exception();
+        }
+      }
+    });
+  }
+
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  if (firstError) {
+    std::rethrow_exception(firstError);
+  }
+}
+
+}  // namespace
 
 BackgroundOrchestrator::BackgroundOrchestrator(NfpCache cache) : cache_(std::move(cache)) {}
 
@@ -43,13 +100,11 @@ PlacementResult BackgroundOrchestrator::run(BackgroundRequest data, EventSink& s
   }
 
   auto pairs = preprocessMissingPairs(parts, cache_);
-  for (size_t i = 0; i < pairs.size(); ++i) {
-    sink.onProgress(data.index, 0.5 * (static_cast<double>(i) / std::max<size_t>(1, pairs.size())));
-    auto nfp = getOuterNfp(pairs[i].A, pairs[i].B, false, data.config, cache_);
-    if (!nfp.has_value()) {
-      continue;
-    }
-  }
+  sink.onProgress(data.index, 0.0);
+  // Only independent cache warm-up runs in parallel; greedy placement stays sequential so
+  // accepted placements and tie-breaking remain deterministic for the same input/order.
+  precomputeMissingPairs(pairs, data.config, cache_, data.config.threads);
+  sink.onProgress(data.index, 0.5);
 
   sink.onTestStart(sheets, parts, data.config, data.index);
   auto result = placeParts(sheets, parts, data.config, cache_, [&](double p) { sink.onProgress(data.index, p); });

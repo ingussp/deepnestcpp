@@ -3,7 +3,9 @@
 #include "deepnestcpp/model.hpp"
 
 #include <cstddef>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -25,6 +27,10 @@ struct NfpKeyHash {
 
 class NfpCache {
  public:
+  NfpCache() = default;
+  NfpCache(const NfpCache& other);
+  NfpCache& operator=(const NfpCache& other);
+
   bool has(const NfpKey& key) const;
   std::optional<Polygon> findOuter(const NfpKey& key) const;
   std::optional<std::vector<Polygon>> findInner(const NfpKey& key) const;
@@ -34,6 +40,9 @@ class NfpCache {
   size_t innerStoreCount() const;
 
  private:
+  // Return values are copied out while the shared lock is held so callers never observe
+  // references that would become invalid after the lock is released.
+  mutable std::shared_mutex mutex_;
   std::unordered_map<NfpKey, Polygon, NfpKeyHash> outer_;
   std::unordered_map<NfpKey, std::vector<Polygon>, NfpKeyHash> inner_;
   size_t outerStoreCount_{0};
