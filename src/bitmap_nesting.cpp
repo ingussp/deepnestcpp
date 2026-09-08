@@ -6,8 +6,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <iomanip>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -39,6 +37,7 @@ struct BitmapGrid {
 struct RasterMask {
   Polygon rotatedPart;
   double rotationDeg{0.0};
+  Bounds rotatedBounds;
   double minX{0.0};
   double minY{0.0};
   int widthPx{0};
@@ -46,6 +45,14 @@ struct RasterMask {
   size_t wordsPerRow{0};
   std::vector<uint64_t> bits;
 };
+
+bool boundsIntersect(const Bounds& a, const Bounds& b) {
+  const double aRight = a.x + a.width;
+  const double aBottom = a.y + a.height;
+  const double bRight = b.x + b.width;
+  const double bBottom = b.y + b.height;
+  return !(aRight <= b.x || bRight <= a.x || aBottom <= b.y || bBottom <= a.y);
+}
 
 bool pointInSimplePolygon(const std::vector<Point>& polygon, const Point& p) {
   if (polygon.size() < 3) {
@@ -205,6 +212,7 @@ RasterMask rasterizePartMask(const Polygon& part, double rotationDeg, double res
   mask.rotatedPart.filename = part.filename;
 
   const Bounds bounds = getPolygonBounds(mask.rotatedPart.points);
+  mask.rotatedBounds = bounds;
   mask.minX = bounds.x;
   mask.minY = bounds.y;
   mask.widthPx = std::max(1, static_cast<int>(std::ceil(bounds.width / resolutionMm)));
@@ -353,7 +361,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               const std::vector<Polygon>& parts,
                                               const Config& config,
                                               bool useAvx2,
-                                              BitmapNestingStats* stats) {
+                                              BitmapNestingStats* stats,
+                                              const BitmapPartProgressCallback& onPartProgress) {
   PlacementResult out;
   out.totalarea = polygonMaterialArea(sheet);
 
@@ -363,13 +372,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
 
   std::unordered_map<std::string, RasterMask> maskCache;
   std::vector<Polygon> placedAbsolute;
+  std::vector<Bounds> placedBounds;
   std::vector<Placement> placements;
   size_t placedCount = 0;
   size_t unplacedCount = 0;
   const size_t totalParts = parts.size();
   const int searchStep = std::max(1, config.bitmapSearchStepPx);
-  constexpr size_t kPeriodicSearchProgressCandidates = 200000;
   BitmapNestingStats localStats;
+  const auto bitmapStart = std::chrono::steady_clock::now();
 
   for (size_t partIndex = 0; partIndex < parts.size(); ++partIndex) {
     const Polygon& part = parts[partIndex];
@@ -395,19 +405,29 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     int acceptedY = 0;
     size_t partCandidatesExamined = 0;
     size_t partBoundaryRejects = 0;
-    size_t partBitmapCollisionRejects = 0;
+    size_t partBitmapCollisions = 0;
     size_t partVectorValidationRejects = 0;
     bool placed = false;
-    for (int x = 0; !placed && x < material.widthPx; x += searchStep) {
-      for (int y = 0; !placed && y < material.heightPx; y += searchStep) {
+    int globalMaxOriginX = std::numeric_limits<int>::min();
+    int globalMaxOriginY = std::numeric_limits<int>::min();
+    for (const RasterMask* mask : rotationMasks) {
+      globalMaxOriginX = std::max(globalMaxOriginX, material.widthPx - mask->widthPx);
+      globalMaxOriginY = std::max(globalMaxOriginY, material.heightPx - mask->heightPx);
+    }
+
+    Polygon acceptedAbsolute;
+    Bounds acceptedBounds;
+
+    for (int x = 0; !placed && x <= globalMaxOriginX; x += searchStep) {
+      for (int y = 0; !placed && y <= globalMaxOriginY; y += searchStep) {
         for (const RasterMask* mask : rotationMasks) {
           ++partCandidatesExamined;
-          if (x + mask->widthPx > material.widthPx || y + mask->heightPx > material.heightPx) {
+          if (x > material.widthPx - mask->widthPx || y > material.heightPx - mask->heightPx) {
             ++partBoundaryRejects;
             continue;
           }
           if (!maskFits(occupancy, material, *mask, x, y, useAvx2)) {
-            ++partBitmapCollisionRejects;
+            ++partBitmapCollisions;
             continue;
           }
 
@@ -422,9 +442,17 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
               ++partVectorValidationRejects;
               continue;
             }
+
+            const Bounds absoluteBounds{mask->rotatedBounds.x + shiftX,
+                                        mask->rotatedBounds.y + shiftY,
+                                        mask->rotatedBounds.width,
+                                        mask->rotatedBounds.height};
             bool overlap = false;
-            for (const auto& already : placedAbsolute) {
-              if (hasMaterialOverlap(absolute, already, config)) {
+            for (size_t placedIndex = 0; placedIndex < placedAbsolute.size(); ++placedIndex) {
+              if (!boundsIntersect(absoluteBounds, placedBounds[placedIndex])) {
+                continue;
+              }
+              if (hasMaterialOverlap(absolute, placedAbsolute[placedIndex], config)) {
                 overlap = true;
                 break;
               }
@@ -433,6 +461,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
               ++partVectorValidationRejects;
               continue;
             }
+            acceptedAbsolute = std::move(absolute);
+            acceptedBounds = absoluteBounds;
           }
           acceptedPlacement = Placement{
               shiftX, shiftY, part.id, mask->rotationDeg, part.source, part.filename, 0.0, {}};
@@ -442,20 +472,11 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           placed = true;
           break;
         }
-        if (config.debugPlacement && !placed &&
-            partCandidatesExamined > 0 &&
-            (partCandidatesExamined % kPeriodicSearchProgressCandidates) == 0) {
-          std::cout << "bitmap part=" << (partIndex + 1) << "/" << totalParts
-                    << " placed=" << placedCount
-                    << " unplaced=" << unplacedCount
-                    << " state=searching candidates=" << partCandidatesExamined
-                    << " boundary_rejects=" << partBoundaryRejects
-                    << " bitmap_collision_rejects=" << partBitmapCollisionRejects
-                    << " vector_rejects=" << partVectorValidationRejects << "\n"
-                    << std::flush;
-        }
       }
     }
+
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
 
     if (!acceptedPlacement.has_value() || acceptedMask == nullptr) {
       out.unplaced.push_back(part);
@@ -464,71 +485,66 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       localStats.processedParts++;
       localStats.candidatesExamined += partCandidatesExamined;
       localStats.boundaryRejects += partBoundaryRejects;
-      localStats.bitmapCollisionRejects += partBitmapCollisionRejects;
+      localStats.bitmapCollisions += partBitmapCollisions;
       localStats.vectorValidationRejects += partVectorValidationRejects;
-      const double elapsedMs =
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
-      localStats.perPart.push_back(BitmapNestingStats::PartStats{
+      auto& partStats = localStats.perPart.emplace_back(BitmapNestingStats::PartStats{
           partIndex + 1,
           false,
+          placedCount,
+          unplacedCount,
           elapsedMs,
           partCandidatesExamined,
           partBoundaryRejects,
-          partBitmapCollisionRejects,
+          partBitmapCollisions,
           partVectorValidationRejects});
-      if (config.debugPlacement) {
-        std::cout << std::fixed << std::setprecision(3)
-                  << "bitmap part=" << (partIndex + 1) << "/" << totalParts
-                  << " placed=" << placedCount
-                  << " unplaced=" << unplacedCount
-                  << " status=unplaced part_ms=" << elapsedMs
-                  << " candidates=" << partCandidatesExamined
-                  << " boundary_rejects=" << partBoundaryRejects
-                  << " bitmap_collision_rejects=" << partBitmapCollisionRejects
-                  << " vector_rejects=" << partVectorValidationRejects << "\n"
-                  << std::flush;
+      if (onPartProgress) {
+        onPartProgress(partStats, totalParts);
       }
       continue;
     }
 
     applyMask(occupancy, *acceptedMask, acceptedX, acceptedY, useAvx2);
     placements.push_back(*acceptedPlacement);
-    Polygon placedPolygon = shiftPolygon(acceptedMask->rotatedPart, {acceptedPlacement->x, acceptedPlacement->y, true});
+    Polygon placedPolygon;
+    if (config.bitmapValidateGeometry) {
+      placedPolygon = acceptedAbsolute;
+      placedBounds.push_back(acceptedBounds);
+    } else {
+      placedPolygon = shiftPolygon(acceptedMask->rotatedPart, {acceptedPlacement->x, acceptedPlacement->y, true});
+      placedBounds.push_back(Bounds{acceptedMask->rotatedBounds.x + acceptedPlacement->x,
+                                    acceptedMask->rotatedBounds.y + acceptedPlacement->y,
+                                    acceptedMask->rotatedBounds.width,
+                                    acceptedMask->rotatedBounds.height});
+    }
     placedAbsolute.push_back(placedPolygon);
     out.area += polygonMaterialArea(placedPolygon);
     ++placedCount;
+    localStats.acceptedPlacements++;
     localStats.placedParts++;
     localStats.processedParts++;
     localStats.candidatesExamined += partCandidatesExamined;
     localStats.boundaryRejects += partBoundaryRejects;
-    localStats.bitmapCollisionRejects += partBitmapCollisionRejects;
+    localStats.bitmapCollisions += partBitmapCollisions;
     localStats.vectorValidationRejects += partVectorValidationRejects;
-    const double elapsedMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
-    localStats.perPart.push_back(BitmapNestingStats::PartStats{
+    auto& partStats = localStats.perPart.emplace_back(BitmapNestingStats::PartStats{
         partIndex + 1,
         true,
+        placedCount,
+        unplacedCount,
         elapsedMs,
         partCandidatesExamined,
         partBoundaryRejects,
-        partBitmapCollisionRejects,
+        partBitmapCollisions,
         partVectorValidationRejects});
-    if (config.debugPlacement) {
-      std::cout << std::fixed << std::setprecision(3)
-                << "bitmap part=" << (partIndex + 1) << "/" << totalParts
-                << " placed=" << placedCount
-                << " unplaced=" << unplacedCount
-                << " status=placed part_ms=" << elapsedMs
-                << " candidates=" << partCandidatesExamined
-                << " boundary_rejects=" << partBoundaryRejects
-                << " bitmap_collision_rejects=" << partBitmapCollisionRejects
-                << " vector_rejects=" << partVectorValidationRejects << "\n"
-                << std::flush;
+    if (onPartProgress) {
+      onPartProgress(partStats, totalParts);
     }
   }
 
   localStats.cachedMaskCount = maskCache.size();
   localStats.simdBackend = useAvx2 ? "avx2" : "scalar";
+  localStats.totalBitmapMs =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - bitmapStart).count();
   if (stats != nullptr) {
     *stats = std::move(localStats);
   }
@@ -553,7 +569,8 @@ bool bitmapAvx2Supported() {
 PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  const std::vector<Polygon>& parts,
                                  const Config& config,
-                                 BitmapNestingStats* stats) {
+                                 BitmapNestingStats* stats,
+                                 const BitmapPartProgressCallback& onPartProgress) {
   if (config.bitmapResolutionMm <= 0.0) {
     throw std::invalid_argument("--bitmap-resolution must be a positive number");
   }
@@ -572,7 +589,8 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
 #endif
 
   BitmapNestingStats localStats;
-  PlacementResult result = placePartsBitmapOnSingleSheet(sheets.front(), parts, config, useAvx2, &localStats);
+  PlacementResult result =
+      placePartsBitmapOnSingleSheet(sheets.front(), parts, config, useAvx2, &localStats, onPartProgress);
   if (stats != nullptr) {
     *stats = localStats;
   }

@@ -36,6 +36,7 @@ ctest --test-dir build --output-on-failure
 ./build/deepnestcpp_demo --count 20 --algorithm nfp --threads 1 --output /tmp/nfp.dxf
 ./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --bitmap-step 1 --threads 8 --output /tmp/bitmap.dxf
 ./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --debug-placement --output /tmp/bitmap-debug.dxf
+./build/deepnestcpp_demo --algorithm bitmap --debug-placement --bitmap-resolution 1.0 --threads 12 --output /tmp/bitmap-debug-threads12.dxf
 ```
 
 The demo uses the supplied `neregulara_zvaigzne.svg` path in **normalized local coordinates after applying the SVG group's `scale(1,-1)` flip**. The group translation is treated as SVG canvas placement and is not baked into the part, so the exported DXF remains in millimetres and contains the correct transformed outline for each placed copy.
@@ -79,11 +80,13 @@ When `--debug-placement` is enabled, each processed part logs:
 
 - `candidates`: candidate placements examined (x/y/rotation attempts)
 - `boundary_rejects`: candidates rejected because the mask would exceed sheet raster bounds
-- `bitmap_collision_rejects`: candidates rejected by occupancy/material bitmap checks
+- `bitmap_collisions`: candidates rejected by occupancy/material bitmap checks
 - `vector_rejects`: candidates rejected by vector geometry validation (enabled by default for accepted candidates)
-- `part_ms`: per-part elapsed placement time
+- `elapsed_ms`: per-part elapsed placement time
 
-At the end of bitmap mode, the demo prints aggregate processed/placed/unplaced counts, total candidates, reject totals, mask cache size, SIMD backend, and timing fields.
+At the end of bitmap mode, the demo prints aggregate processed/placed/unplaced counts, total candidates, reject totals, accepted placements, mask cache size, SIMD backend, and timing fields.
+
+Correctness mode: occupancy bitmap checks are authoritative for candidate filtering; vector validation is still applied on accepted candidates by default (`Config::bitmapValidateGeometry=true`) to prevent out-of-sheet placements or geometry overlaps. Disabling it trades strict geometric validation for speed and keeps raster-quantized collision behavior.
 
 ### AVX2 backend
 
@@ -109,6 +112,7 @@ cd C:\dev\deepnestcpp\build\Debug
 deepnestcpp_demo.exe --count 20 --algorithm nfp --threads 1 --output nfp.dxf
 deepnestcpp_demo.exe --count 20 --algorithm bitmap --bitmap-resolution 1.0 --threads 8 --output bitmap.dxf
 deepnestcpp_demo.exe --count 20 --algorithm bitmap --bitmap-resolution 1.0 --debug-placement --output bitmap-debug.dxf
+deepnestcpp_demo.exe --output result.dxf --algorithm bitmap --debug-placement --bitmap-resolution 1.0 --threads 12
 ```
 
 This creates DXF files in millimetres that can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
