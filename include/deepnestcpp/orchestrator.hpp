@@ -1,0 +1,52 @@
+#pragma once
+
+#include "deepnestcpp/model.hpp"
+#include "deepnestcpp/nfp_cache.hpp"
+
+#include <vector>
+
+namespace deepnest {
+
+struct IndividualInput {
+  std::vector<Polygon> placement;
+  std::vector<double> rotation;
+};
+
+struct BackgroundRequest {
+  int index{0};
+  IndividualInput individual;
+
+  std::vector<std::optional<int>> ids;
+  std::vector<std::string> sources;
+  std::vector<std::vector<Polygon>> children;
+  std::vector<std::string> filenames;
+
+  std::vector<Polygon> sheets;
+  std::vector<std::optional<int>> sheetids;
+  std::vector<std::string> sheetsources;
+  std::vector<std::vector<Polygon>> sheetchildren;
+
+  Config config;
+};
+
+class EventSink {
+ public:
+  virtual ~EventSink() = default;
+  virtual void onTestStart(const std::vector<Polygon>& sheets,
+                           const std::vector<Polygon>& parts,
+                           const Config& config,
+                           int index) = 0;
+  virtual void onProgress(int index, double progress) = 0;
+  virtual void onResult(const PlacementResult& result) = 0;
+};
+
+class BackgroundOrchestrator {
+ public:
+  explicit BackgroundOrchestrator(NfpCache cache = {});
+  PlacementResult run(BackgroundRequest data, EventSink& sink);
+
+ private:
+  NfpCache cache_;
+};
+
+}  // namespace deepnest
