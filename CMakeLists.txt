@@ -21,6 +21,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(clipper2)
 
 add_library(deepnestcpp
+  src/bitmap_nesting.cpp
   src/demo_cli.cpp
   src/demo_setup.cpp
   src/dxf_export.cpp
@@ -51,6 +52,7 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(catch2)
 
   add_executable(deepnestcpp_tests
+    tests/test_bitmap_nesting.cpp
     tests/test_demo_cli.cpp
     tests/test_demo_setup.cpp
     tests/test_dxf_export.cpp

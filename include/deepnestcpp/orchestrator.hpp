@@ -3,6 +3,7 @@
 #include "deepnestcpp/model.hpp"
 #include "deepnestcpp/nfp_cache.hpp"
 
+#include <string>
 #include <vector>
 
 namespace deepnest {
@@ -40,10 +41,26 @@ class EventSink {
   virtual void onResult(const PlacementResult& result) = 0;
 };
 
+struct NestingTimings {
+  double setupMs{0.0};
+  double nfpPrecomputeMs{0.0};
+  double placementMs{0.0};
+  double bitmapMs{0.0};
+  double dxfExportMs{0.0};
+  double totalMs{0.0};
+};
+
+struct OrchestratorRunStats {
+  PlacementResult placement;
+  NestingTimings timings;
+  std::string simdBackend{"n/a"};
+};
+
 class BackgroundOrchestrator {
  public:
   explicit BackgroundOrchestrator(NfpCache cache = {});
   PlacementResult run(BackgroundRequest data, EventSink& sink);
+  OrchestratorRunStats runWithStats(BackgroundRequest data, EventSink& sink);
 
  private:
   NfpCache cache_;

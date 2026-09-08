@@ -1,3 +1,4 @@
+#include "deepnestcpp/bitmap_nesting.hpp"
 #include "deepnestcpp/orchestrator.hpp"
 
 #include "deepnestcpp/nfp.hpp"
@@ -5,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -67,6 +69,12 @@ void precomputeMissingPairs(const std::vector<NfpPair>& pairs, const Config& con
 BackgroundOrchestrator::BackgroundOrchestrator(NfpCache cache) : cache_(std::move(cache)) {}
 
 PlacementResult BackgroundOrchestrator::run(BackgroundRequest data, EventSink& sink) {
+  return runWithStats(std::move(data), sink).placement;
+}
+
+OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data, EventSink& sink) {
+  const auto t0 = std::chrono::steady_clock::now();
+  OrchestratorRunStats runStats;
   auto parts = data.individual.placement;
   for (size_t i = 0; i < parts.size(); ++i) {
     if (i < data.individual.rotation.size()) {
@@ -98,18 +106,47 @@ PlacementResult BackgroundOrchestrator::run(BackgroundRequest data, EventSink& s
       sheets[i].children = data.sheetchildren[i];
     }
   }
-
-  auto pairs = preprocessMissingPairs(parts, cache_);
-  sink.onProgress(data.index, 0.0);
-  // Only independent cache warm-up runs in parallel; greedy placement stays sequential so
-  // accepted placements and tie-breaking remain deterministic for the same input/order.
-  precomputeMissingPairs(pairs, data.config, cache_, data.config.threads);
-  sink.onProgress(data.index, 0.5);
+  const auto tSetupEnd = std::chrono::steady_clock::now();
+  runStats.timings.setupMs =
+      std::chrono::duration<double, std::milli>(tSetupEnd - t0).count();
 
   sink.onTestStart(sheets, parts, data.config, data.index);
-  auto result = placeParts(sheets, parts, data.config, cache_, [&](double p) { sink.onProgress(data.index, p); });
-  sink.onResult(result);
-  return result;
+  sink.onProgress(data.index, 0.0);
+
+  if (data.config.algorithm == NestingAlgorithm::Nfp) {
+    const auto tNfpStart = std::chrono::steady_clock::now();
+    auto pairs = preprocessMissingPairs(parts, cache_);
+    // Only independent cache warm-up runs in parallel; greedy placement stays sequential so
+    // accepted placements and tie-breaking remain deterministic for the same input/order.
+    precomputeMissingPairs(pairs, data.config, cache_, data.config.threads);
+    const auto tNfpEnd = std::chrono::steady_clock::now();
+    runStats.timings.nfpPrecomputeMs =
+        std::chrono::duration<double, std::milli>(tNfpEnd - tNfpStart).count();
+    sink.onProgress(data.index, 0.5);
+
+    const auto tPlacementStart = std::chrono::steady_clock::now();
+    runStats.placement =
+        placeParts(sheets, parts, data.config, cache_, [&](double p) { sink.onProgress(data.index, p); });
+    const auto tPlacementEnd = std::chrono::steady_clock::now();
+    runStats.timings.placementMs =
+        std::chrono::duration<double, std::milli>(tPlacementEnd - tPlacementStart).count();
+    runStats.simdBackend = "n/a";
+  } else {
+    const auto tBitmapStart = std::chrono::steady_clock::now();
+    BitmapNestingStats bitmapStats;
+    runStats.placement = placePartsBitmap(sheets, parts, data.config, &bitmapStats);
+    const auto tBitmapEnd = std::chrono::steady_clock::now();
+    runStats.timings.bitmapMs =
+        std::chrono::duration<double, std::milli>(tBitmapEnd - tBitmapStart).count();
+    runStats.timings.placementMs = runStats.timings.bitmapMs;
+    runStats.simdBackend = bitmapStats.simdBackend;
+    sink.onProgress(data.index, -1.0);
+  }
+
+  sink.onResult(runStats.placement);
+  runStats.timings.totalMs =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  return runStats;
 }
 
 }  // namespace deepnest
