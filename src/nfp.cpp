@@ -6,7 +6,7 @@
 #include <clipper2/clipper.h>
 #include <cmath>
 #include <optional>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace deepnest {
 
@@ -101,18 +101,19 @@ std::optional<std::vector<Polygon>> getInnerNfp(const Polygon& A,
                                                 const Polygon& B,
                                                 const Config& config,
                                                 NfpCache& cache) {
-  if (!A.source.empty() && !B.source.empty()) {
-    NfpKey key{A.source, B.source, 0.0, B.rotation, true};
-    if (auto cached = cache.findInner(key); cached.has_value()) {
-      return cached;
-    }
+  const std::string aIdentity = polygonGeometryIdentity(A);
+  const std::string bIdentity = polygonGeometryIdentity(B);
+  NfpKey key{aIdentity, bIdentity, 0.0, B.rotation, true};
+  if (auto cached = cache.findInner(key); cached.has_value()) {
+    return cached;
   }
 
   if (A.points.empty() || B.points.empty()) {
     return std::nullopt;
   }
 
-  Paths64 current = materialContainerPaths(A, config);
+  const Paths64 container = materialContainerPaths(A, config);
+  Paths64 current = container;
   if (current.empty()) {
     return std::nullopt;
   }
@@ -121,10 +122,9 @@ std::optional<std::vector<Polygon>> getInnerNfp(const Polygon& A,
   for (const auto& v : B.points) {
     const int64_t dx = static_cast<int64_t>(std::llround((v.x - origin.x) * config.clipperScale));
     const int64_t dy = static_cast<int64_t>(std::llround((v.y - origin.y) * config.clipperScale));
-
     Paths64 shifted;
     shifted.reserve(current.size());
-    Paths64 container = materialContainerPaths(A, config);
+    shifted.reserve(current.size());
     for (const auto& path : container) {
       Path64 translated;
       translated.reserve(path.size());
@@ -153,11 +153,7 @@ std::optional<std::vector<Polygon>> getInnerNfp(const Polygon& A,
     return std::nullopt;
   }
 
-  if (!A.source.empty() && !B.source.empty()) {
-    NfpKey key{A.source, B.source, 0.0, B.rotation, true};
-    cache.insertInner(key, result);
-  }
-
+  cache.insertInner(key, result);
   return result;
 }
 
@@ -166,8 +162,10 @@ std::optional<Polygon> getOuterNfp(const Polygon& A,
                                    bool inside,
                                    const Config& config,
                                    NfpCache& cache) {
-  NfpKey key{A.source, B.source, A.rotation, B.rotation, false};
-  if (!inside && !A.source.empty() && !B.source.empty()) {
+  const std::string aIdentity = polygonGeometryIdentity(A);
+  const std::string bIdentity = polygonGeometryIdentity(B);
+  NfpKey key{aIdentity, bIdentity, A.rotation, B.rotation, false};
+  if (!inside) {
     if (auto cached = cache.findOuter(key); cached.has_value()) {
       return cached;
     }
@@ -194,7 +192,7 @@ std::optional<Polygon> getOuterNfp(const Polygon& A,
     }
   }
 
-  if (!inside && !A.source.empty() && !B.source.empty()) {
+  if (!inside) {
     cache.insertOuter(key, nfp);
   }
 
@@ -203,20 +201,48 @@ std::optional<Polygon> getOuterNfp(const Polygon& A,
 
 std::vector<NfpPair> preprocessMissingPairs(const std::vector<Polygon>& parts, NfpCache& cache) {
   std::vector<NfpPair> pairs;
-  std::unordered_set<std::string> seen;
+  struct RepresentativePart {
+    Polygon polygon;
+    std::string identity;
+    size_t count{0};
+  };
 
-  for (size_t i = 0; i < parts.size(); ++i) {
-    const auto& B = parts[i];
+  std::vector<RepresentativePart> representatives;
+  representatives.reserve(parts.size());
+  std::unordered_map<std::string, size_t> representativeIndexBySignature;
+
+  // Collapse identical geometry+rotation inputs to representatives so the warm-up step
+  // scales with unique shapes instead of raw instance count. Each physical instance is
+  // still placed later; this only avoids redundant pair discovery and NFP generation.
+  for (const auto& part : parts) {
+    const std::string identity = polygonGeometryIdentity(part);
+    const std::string signature = identity + "|" + std::to_string(part.rotation);
+    const auto [it, inserted] = representativeIndexBySignature.emplace(signature, representatives.size());
+    if (inserted) {
+      representatives.push_back(RepresentativePart{part, identity, 1});
+    } else {
+      ++representatives[it->second].count;
+    }
+  }
+
+  for (size_t i = 0; i < representatives.size(); ++i) {
+    const auto& B = representatives[i];
+    if (B.count > 1) {
+      NfpKey sameKey{B.identity, B.identity, B.polygon.rotation, B.polygon.rotation, false};
+      if (!cache.has(sameKey)) {
+        pairs.push_back(NfpPair{B.polygon, B.polygon, B.polygon.rotation, B.polygon.rotation, B.polygon.source,
+                                B.polygon.source});
+      }
+    }
+
     for (size_t j = 0; j < i; ++j) {
-      const auto& A = parts[j];
-      NfpKey key{A.source, B.source, A.rotation, B.rotation, false};
-      const std::string sig = A.source + "|" + B.source + "|" + std::to_string(A.rotation) + "|" +
-                              std::to_string(B.rotation);
-      if (seen.contains(sig) || cache.has(key)) {
+      const auto& A = representatives[j];
+      NfpKey key{A.identity, B.identity, A.polygon.rotation, B.polygon.rotation, false};
+      if (cache.has(key)) {
         continue;
       }
-      seen.insert(sig);
-      pairs.push_back(NfpPair{A, B, A.rotation, B.rotation, A.source, B.source});
+      pairs.push_back(
+          NfpPair{A.polygon, B.polygon, A.polygon.rotation, B.polygon.rotation, A.polygon.source, B.polygon.source});
     }
   }
 
