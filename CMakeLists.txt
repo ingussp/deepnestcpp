@@ -20,6 +20,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(clipper2)
 
 add_library(deepnestcpp
+  src/dxf_export.cpp
   src/geometry.cpp
   src/nfp_cache.cpp
   src/nfp.cpp
@@ -47,6 +48,7 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(catch2)
 
   add_executable(deepnestcpp_tests
+    tests/test_dxf_export.cpp
     tests/test_geometry.cpp
     tests/test_nfp.cpp
     tests/test_placement.cpp

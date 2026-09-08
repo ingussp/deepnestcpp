@@ -34,6 +34,15 @@ ctest --test-dir build --output-on-failure
 ./build/deepnestcpp_demo
 ```
 
+### Windows DXF export
+
+```powershell
+cd C:\dev\deepnestcpp\build\Debug
+deepnestcpp_demo.exe --output result.dxf
+```
+
+This creates `C:\dev\deepnestcpp\build\Debug\result.dxf`, which can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
+
 ## Notes
 
 - Clipper2 is fetched with CMake `FetchContent` for reproducible setup.
