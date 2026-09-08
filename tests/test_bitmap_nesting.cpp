@@ -48,7 +48,9 @@ TEST_CASE("bitmap scalar placement works on small fixture") {
   REQUIRE(stats.simdBackend == "scalar");
   REQUIRE(stats.processedParts == parts.size());
   REQUIRE(stats.placedParts == parts.size());
+  REQUIRE(stats.acceptedPlacements == parts.size());
   REQUIRE(stats.unplacedParts == 0);
+  REQUIRE(stats.totalBitmapMs >= 0.0);
 }
 
 TEST_CASE("bitmap placements are inside sheet and non-overlapping") {
@@ -122,10 +124,41 @@ TEST_CASE("bitmap stats record every processed part in debug mode") {
   REQUIRE(stats.processedParts == parts.size());
   REQUIRE(stats.perPart.size() == parts.size());
   REQUIRE(stats.placedParts + stats.unplacedParts == stats.processedParts);
+  REQUIRE(stats.acceptedPlacements == stats.placedParts);
   REQUIRE(result.unplaced.size() == stats.unplacedParts);
   for (size_t i = 0; i < stats.perPart.size(); ++i) {
     REQUIRE(stats.perPart[i].processedPart == i + 1);
     REQUIRE(stats.perPart[i].candidatesExamined > 0);
+  }
+}
+
+TEST_CASE("bitmap emits one progress callback per processed part including unplaced") {
+  Config cfg;
+  cfg.algorithm = NestingAlgorithm::Bitmap;
+  cfg.bitmapResolutionMm = 1.0;
+  cfg.bitmapPreferAvx2 = false;
+  cfg.rotations = 1;
+
+  Polygon sheet = rect(0, 0, 10, 10, "sheet", 100);
+  auto parts = std::vector<Polygon>{rect(0, 0, 6, 6, "p1", 1), rect(0, 0, 6, 6, "p2", 2), rect(0, 0, 6, 6, "p3", 3)};
+  std::vector<BitmapNestingStats::PartStats> emitted;
+
+  BitmapNestingStats stats;
+  const auto result = placePartsBitmap({sheet},
+                                       parts,
+                                       cfg,
+                                       &stats,
+                                       [&](const BitmapNestingStats::PartStats& partStats, size_t totalParts) {
+                                         REQUIRE(totalParts == parts.size());
+                                         emitted.push_back(partStats);
+                                       });
+
+  REQUIRE(emitted.size() == parts.size());
+  REQUIRE(stats.perPart.size() == parts.size());
+  REQUIRE(result.unplaced.size() > 0);
+  REQUIRE(emitted.back().unplacedParts == result.unplaced.size());
+  for (size_t i = 0; i < emitted.size(); ++i) {
+    REQUIRE(emitted[i].processedPart == i + 1);
   }
 }
 

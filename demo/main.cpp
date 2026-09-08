@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -66,9 +67,29 @@ class StdoutSink : public EventSink {
               << " utilisation=" << result.utilisation << "%\n";
   }
 
+  void onBitmapPartProgress(const BitmapNestingStats::PartStats& partStats, size_t totalParts) override {
+    if (!debugPlacementEnabled_) {
+      return;
+    }
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(3)
+         << "bitmap part=" << partStats.processedPart << "/" << totalParts
+         << " placed=" << partStats.placedParts
+         << " unplaced=" << partStats.unplacedParts
+         << " candidates=" << partStats.candidatesExamined
+         << " bitmap_collisions=" << partStats.bitmapCollisions
+         << " boundary_rejects=" << partStats.boundaryRejects
+         << " vector_rejects=" << partStats.vectorValidationRejects
+         << " elapsed_ms=" << partStats.elapsedMs;
+    std::cout << line.str() << "\n" << std::flush;
+  }
+
+  void setDebugPlacementEnabled(bool enabled) { debugPlacementEnabled_ = enabled; }
+
  private:
   int workerCount_{1};
   int lastPercent_{-1};
+  bool debugPlacementEnabled_{false};
 };
 
 }  // namespace
@@ -166,6 +187,7 @@ int main(int argc, char** argv) {
 
   StdoutSink sink;
   sink.setWorkerCount(req.config.threads);
+  sink.setDebugPlacementEnabled(req.config.debugPlacement);
   BackgroundOrchestrator orchestrator;
   OrchestratorRunStats runStats;
   try {
@@ -208,9 +230,11 @@ int main(int argc, char** argv) {
               << " unplaced=" << runStats.bitmapStats.unplacedParts
               << " candidates=" << runStats.bitmapStats.candidatesExamined
               << " boundary_rejects=" << runStats.bitmapStats.boundaryRejects
-              << " bitmap_collision_rejects=" << runStats.bitmapStats.bitmapCollisionRejects
+              << " bitmap_collisions=" << runStats.bitmapStats.bitmapCollisions
               << " vector_rejects=" << runStats.bitmapStats.vectorValidationRejects
+              << " accepted=" << runStats.bitmapStats.acceptedPlacements
               << " mask_cache=" << runStats.bitmapStats.cachedMaskCount
+              << " total_ms=" << runStats.bitmapStats.totalBitmapMs
               << " simd=" << runStats.bitmapStats.simdBackend << "\n";
   }
   printTimingLine("timing.setup", runStats.timings.setupMs);

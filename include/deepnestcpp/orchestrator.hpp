@@ -40,6 +40,7 @@ class EventSink {
                            int index) = 0;
   virtual void onProgress(int index, double progress) = 0;
   virtual void onResult(const PlacementResult& result) = 0;
+  virtual void onBitmapPartProgress(const BitmapNestingStats::PartStats&, size_t) {}
 };
 
 struct NestingTimings {

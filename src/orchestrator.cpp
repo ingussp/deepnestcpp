@@ -134,7 +134,11 @@ OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data
   } else {
     const auto tBitmapStart = std::chrono::steady_clock::now();
     BitmapNestingStats bitmapStats;
-    runStats.placement = placePartsBitmap(sheets, parts, data.config, &bitmapStats);
+    runStats.placement =
+        placePartsBitmap(sheets, parts, data.config, &bitmapStats, [&](const BitmapNestingStats::PartStats& partStats,
+                                                                       size_t totalParts) {
+          sink.onBitmapPartProgress(partStats, totalParts);
+        });
     const auto tBitmapEnd = std::chrono::steady_clock::now();
     runStats.timings.bitmapMs =
         std::chrono::duration<double, std::milli>(tBitmapEnd - tBitmapStart).count();
