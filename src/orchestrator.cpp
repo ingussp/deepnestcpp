@@ -140,6 +140,7 @@ OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data
         std::chrono::duration<double, std::milli>(tBitmapEnd - tBitmapStart).count();
     runStats.timings.placementMs = runStats.timings.bitmapMs;
     runStats.simdBackend = bitmapStats.simdBackend;
+    runStats.bitmapStats = bitmapStats;
     sink.onProgress(data.index, -1.0);
   }
 

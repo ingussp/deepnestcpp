@@ -18,6 +18,8 @@ TEST_CASE("demo CLI parses explicit thread count and output") {
   REQUIRE(options.threads == 8);
   REQUIRE(options.algorithm == NestingAlgorithm::Bitmap);
   REQUIRE(options.bitmapResolutionMm == Catch::Approx(0.5));
+  REQUIRE(options.bitmapSearchStepPx == 1);
+  REQUIRE_FALSE(options.debugPlacement);
   REQUIRE(options.outputPath.has_value());
   REQUIRE(options.outputPath->string() == "result.dxf");
   REQUIRE_FALSE(options.showHelp);
@@ -30,6 +32,8 @@ TEST_CASE("demo CLI defaults thread count from hardware with fallback") {
   REQUIRE(options.threads == defaultWorkerCount());
   REQUIRE(options.algorithm == NestingAlgorithm::Nfp);
   REQUIRE(options.bitmapResolutionMm == Catch::Approx(1.0));
+  REQUIRE(options.bitmapSearchStepPx == 1);
+  REQUIRE_FALSE(options.debugPlacement);
   REQUIRE(options.threads >= 1);
 }
 
@@ -47,4 +51,18 @@ TEST_CASE("demo CLI rejects invalid algorithm and bitmap resolution") {
                       Catch::Matchers::ContainsSubstring("Unknown algorithm"));
   REQUIRE_THROWS_WITH(parseDemoCliOptions({"--bitmap-resolution", "0"}),
                       Catch::Matchers::ContainsSubstring("--bitmap-resolution must be a positive number"));
+}
+
+TEST_CASE("demo CLI parses bitmap debug placement flag and bitmap step") {
+  const auto options = parseDemoCliOptions({"--algorithm", "bitmap", "--debug-placement", "--bitmap-step", "3"});
+  REQUIRE(options.algorithm == NestingAlgorithm::Bitmap);
+  REQUIRE(options.debugPlacement);
+  REQUIRE(options.bitmapSearchStepPx == 3);
+}
+
+TEST_CASE("demo CLI rejects invalid bitmap step") {
+  REQUIRE_THROWS_WITH(parseDemoCliOptions({"--bitmap-step"}),
+                      Catch::Matchers::ContainsSubstring("Missing value for --bitmap-step"));
+  REQUIRE_THROWS_WITH(parseDemoCliOptions({"--bitmap-step", "0"}),
+                      Catch::Matchers::ContainsSubstring("--bitmap-step must be a positive integer"));
 }

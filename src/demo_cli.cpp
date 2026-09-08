@@ -50,7 +50,7 @@ NestingAlgorithm parseAlgorithm(std::string_view raw) {
 
 DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
   DemoCliOptions options{
-      kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, std::nullopt, false};
+      kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, 1, false, std::nullopt, false};
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view arg = args[i];
@@ -94,6 +94,17 @@ DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
         throw std::invalid_argument("Missing value for --bitmap-resolution");
       }
       options.bitmapResolutionMm = parsePositiveDouble(args[++i], "--bitmap-resolution");
+      continue;
+    }
+    if (arg == "--bitmap-step") {
+      if (i + 1 >= args.size()) {
+        throw std::invalid_argument("Missing value for --bitmap-step");
+      }
+      options.bitmapSearchStepPx = parsePositiveValue(args[++i], "--bitmap-step");
+      continue;
+    }
+    if (arg == "--debug-placement") {
+      options.debugPlacement = true;
       continue;
     }
 

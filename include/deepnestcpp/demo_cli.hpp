@@ -14,6 +14,8 @@ struct DemoCliOptions {
   int threads;
   NestingAlgorithm algorithm;
   double bitmapResolutionMm;
+  int bitmapSearchStepPx;
+  bool debugPlacement;
   std::optional<std::filesystem::path> outputPath;
   bool showHelp{false};
 };

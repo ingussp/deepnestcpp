@@ -34,7 +34,8 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 ./build/deepnestcpp_demo --count 20 --algorithm nfp --threads 1 --output /tmp/nfp.dxf
-./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --threads 8 --output /tmp/bitmap.dxf
+./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --bitmap-step 1 --threads 8 --output /tmp/bitmap.dxf
+./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --debug-placement --output /tmp/bitmap-debug.dxf
 ```
 
 The demo uses the supplied `neregulara_zvaigzne.svg` path in **normalized local coordinates after applying the SVG group's `scale(1,-1)` flip**. The group translation is treated as SVG canvas placement and is not baked into the part, so the exported DXF remains in millimetres and contains the correct transformed outline for each placed copy.
@@ -63,8 +64,26 @@ The demo prints algorithm, sheet size, count, workers, bitmap resolution, SIMD b
 
 - `--algorithm nfp` keeps the existing NFP path as the reference/correctness implementation.
 - `--algorithm bitmap` uses rasterized occupancy checks with configurable `--bitmap-resolution <mm-per-pixel>` (default `1.0`).
+- `--debug-placement` prints per-part bitmap progress with candidate/reject counters and part processing time.
+- `--bitmap-step <px>` controls deterministic bitmap candidate scan spacing (`1` = full scan, larger values = faster but less dense search).
 - Bitmap placements are raster-quantized. Smaller values improve precision but increase CPU/memory cost.
 - If raster dimensions become too large, the program rejects the run with a clear error and asks for a larger `--bitmap-resolution`.
+
+### Bitmap performance notes and debug counters
+
+- Previous slow path behavior was dominated by `raster x/y search × rotations × repeated per-candidate vector overlap checks`.
+- Current bitmap path keeps occupancy bitmap checks as the primary collision filter and runs expensive vector geometry validation only on accepted candidates (or when explicitly configured).
+- Raster masks are cached by `geometry identity + rotation`, so repeated identical parts reuse the same bitmap mask.
+
+When `--debug-placement` is enabled, each processed part logs:
+
+- `candidates`: candidate placements examined (x/y/rotation attempts)
+- `boundary_rejects`: candidates rejected because the mask would exceed sheet raster bounds
+- `bitmap_collision_rejects`: candidates rejected by occupancy/material bitmap checks
+- `vector_rejects`: candidates rejected by vector geometry validation (enabled by default for accepted candidates)
+- `part_ms`: per-part elapsed placement time
+
+At the end of bitmap mode, the demo prints aggregate processed/placed/unplaced counts, total candidates, reject totals, mask cache size, SIMD backend, and timing fields.
 
 ### AVX2 backend
 
@@ -89,6 +108,7 @@ cmake --build build --config Release
 cd C:\dev\deepnestcpp\build\Debug
 deepnestcpp_demo.exe --count 20 --algorithm nfp --threads 1 --output nfp.dxf
 deepnestcpp_demo.exe --count 20 --algorithm bitmap --bitmap-resolution 1.0 --threads 8 --output bitmap.dxf
+deepnestcpp_demo.exe --count 20 --algorithm bitmap --bitmap-resolution 1.0 --debug-placement --output bitmap-debug.dxf
 ```
 
 This creates DXF files in millimetres that can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
