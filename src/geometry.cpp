@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 
 namespace deepnest {
 
@@ -88,7 +89,7 @@ Polygon rotatePolygon(const Polygon& polygon, double degrees) {
   rotated.points.clear();
   rotated.points.reserve(polygon.points.size());
 
-  const double angle = degrees * M_PI / 180.0;
+  const double angle = degrees * std::numbers::pi_v<double> / 180.0;
   const double c = std::cos(angle);
   const double s = std::sin(angle);
 
