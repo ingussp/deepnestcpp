@@ -25,7 +25,7 @@ TEST_CASE("demo star parts share geometry identity and unique ids") {
   REQUIRE(ids.size() == parts.size());
 }
 
-TEST_CASE("demo geometry uses normalized transformed star and full sheet size") {
+TEST_CASE("demo geometry uses normalized transformed star and 1500x1500 sheet size") {
   const Polygon star = makeDemoStarPolygon();
   const Polygon sheet = makeDemoSheet();
   const Bounds starBounds = getPolygonBounds(star.points);

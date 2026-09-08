@@ -55,7 +55,7 @@ std::vector<Polygon> makeDemoStarParts(int count) {
 }
 
 Polygon makeDemoSheet() {
-  return makeRect(0.0, 0.0, kDemoSheetWidthMm, kDemoSheetHeightMm, "sheet_2000x2800", 1);
+  return makeRect(0.0, 0.0, kDemoSheetWidthMm, kDemoSheetHeightMm, "sheet_1500x1500", 1);
 }
 
 }  // namespace deepnest

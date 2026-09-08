@@ -180,3 +180,35 @@ TEST_CASE("threads 1 and multi-worker produce the same valid placements") {
   requirePlacementValidity(singleResult, sheet, parts, singleRequest.config);
   requirePlacementValidity(parallelResult, sheet, parts, parallelRequest.config);
 }
+
+TEST_CASE("orchestrator exposes timing stats for NFP and bitmap algorithms") {
+  Polygon sheet = makeDemoSheet();
+  const auto parts = makeDemoStarParts(3);
+
+  BackgroundRequest nfpRequest;
+  nfpRequest.index = 1;
+  nfpRequest.config.placementType = "box";
+  nfpRequest.config.rotations = 1;
+  nfpRequest.config.algorithm = NestingAlgorithm::Nfp;
+  nfpRequest.sheets = {sheet};
+  nfpRequest.individual.placement = parts;
+  nfpRequest.individual.rotation.assign(parts.size(), 0.0);
+
+  BackgroundRequest bitmapRequest = nfpRequest;
+  bitmapRequest.config.algorithm = NestingAlgorithm::Bitmap;
+  bitmapRequest.config.bitmapResolutionMm = 1.0;
+  bitmapRequest.config.bitmapPreferAvx2 = false;
+
+  NullSink sink;
+  BackgroundOrchestrator orchestrator;
+  const auto nfpStats = orchestrator.runWithStats(nfpRequest, sink);
+  const auto bitmapStats = orchestrator.runWithStats(bitmapRequest, sink);
+
+  REQUIRE(nfpStats.timings.totalMs >= 0.0);
+  REQUIRE(nfpStats.timings.nfpPrecomputeMs >= 0.0);
+  REQUIRE(bitmapStats.timings.totalMs >= 0.0);
+  REQUIRE(bitmapStats.timings.bitmapMs >= 0.0);
+  REQUIRE(bitmapStats.simdBackend == "scalar");
+  REQUIRE_FALSE(nfpStats.placement.placements.empty());
+  REQUIRE_FALSE(bitmapStats.placement.placements.empty());
+}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "deepnestcpp/model.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string_view>
@@ -10,6 +12,8 @@ namespace deepnest {
 struct DemoCliOptions {
   int count;
   int threads;
+  NestingAlgorithm algorithm;
+  double bitmapResolutionMm;
   std::optional<std::filesystem::path> outputPath;
   bool showHelp{false};
 };

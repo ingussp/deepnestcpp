@@ -11,6 +11,7 @@ C++20 port of computational behavior from:
 - Geometry helpers (`mergedLength`, shift/rotate, hull, area-with-holes, conversion helpers)
 - In-memory `NfpCache`
 - Outer and inner NFP computation paths with caching and pair preprocessing
+- Alternative bitmap nesting path with rasterized occupancy checks
 - Greedy `placeParts` implementation with `gravity`, `box`, and `convexhull` strategies
 - Safe C++20 multithreaded warm-up for independent unique NFP pairs
 - Event-sink orchestration API replacing Electron IPC (`background-start` equivalent)
@@ -32,18 +33,45 @@ ctest --test-dir build --output-on-failure
 ## Run demo
 
 ```bash
-./build/deepnestcpp_demo --count 20 --threads 1 --output /tmp/star-demo.dxf
+./build/deepnestcpp_demo --count 20 --algorithm nfp --threads 1 --output /tmp/nfp.dxf
+./build/deepnestcpp_demo --count 20 --algorithm bitmap --bitmap-resolution 1.0 --threads 8 --output /tmp/bitmap.dxf
 ```
 
 The demo uses the supplied `neregulara_zvaigzne.svg` path in **normalized local coordinates after applying the SVG group's `scale(1,-1)` flip**. The group translation is treated as SVG canvas placement and is not baked into the part, so the exported DXF remains in millimetres and contains the correct transformed outline for each placed copy.
 
-For a full run with 2,000 copies on one `2000 mm × 2800 mm` sheet:
+The demo sheet is `1500 mm × 1500 mm` and DXF is exported in millimetres.
+
+For a full run with 2,000 copies:
 
 ```bash
-./build/deepnestcpp_demo --count 2000 --threads 8 --output /tmp/star-demo-2000.dxf
+./build/deepnestcpp_demo --count 2000 --algorithm nfp --threads 8 --output /tmp/star-demo-2000.dxf
 ```
 
-The full nesting run can take noticeable time depending on hardware. The demo prints the selected worker count at startup. `--threads 1` is the single-thread baseline, while the default is `std::thread::hardware_concurrency()` with a fallback to `1` if the platform does not report a value.
+The demo prints algorithm, sheet size, count, workers, bitmap resolution, SIMD backend (`scalar`/`avx2`), placed/unplaced counts, utilisation, and timing breakdown:
+
+- `timing.setup`
+- `timing.nfp_precompute`
+- `timing.placement`
+- `timing.bitmap`
+- `timing.dxf_export`
+- `timing.orchestrator_total`
+- `timing.total_with_output`
+
+`--threads 1` is a baseline. Worker threads do **not** run the entire greedy sequence concurrently; they are used for independent work (for example NFP warm-up), while accepted placements are still committed sequentially for deterministic non-overlapping results.
+
+## Algorithms
+
+- `--algorithm nfp` keeps the existing NFP path as the reference/correctness implementation.
+- `--algorithm bitmap` uses rasterized occupancy checks with configurable `--bitmap-resolution <mm-per-pixel>` (default `1.0`).
+- Bitmap placements are raster-quantized. Smaller values improve precision but increase CPU/memory cost.
+- If raster dimensions become too large, the program rejects the run with a clear error and asks for a larger `--bitmap-resolution`.
+
+### AVX2 backend
+
+- Bitmap execution uses scalar code by default on unsupported CPUs/builds.
+- On AVX2-capable builds, runtime detection selects 256-bit row operations (`avx2`) automatically; otherwise it falls back to `scalar`.
+- AVX2 intrinsics are isolated to bitmap implementation code and are not required for the whole binary.
+- On MSVC/Windows, AVX2 code is guarded: runtime checks are required before execution, and scalar fallback always works.
 
 ## Thread model
 
@@ -58,8 +86,9 @@ The full nesting run can take noticeable time depending on hardware. The demo pr
 ```powershell
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-.\build\Release\deepnestcpp_demo.exe --count 20 --threads 1 --output single.dxf
-.\build\Release\deepnestcpp_demo.exe --count 2000 --threads 8 --output result.dxf
+cd C:\dev\deepnestcpp\build\Debug
+deepnestcpp_demo.exe --count 20 --algorithm nfp --threads 1 --output nfp.dxf
+deepnestcpp_demo.exe --count 20 --algorithm bitmap --bitmap-resolution 1.0 --threads 8 --output bitmap.dxf
 ```
 
 This creates DXF files in millimetres that can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
@@ -69,3 +98,4 @@ This creates DXF files in millimetres that can be opened in LibreCAD, QCAD, Auto
 - Clipper2 is fetched with CMake `FetchContent` for reproducible setup.
 - Inner-NFP hole handling is implemented with polygon-material intersection/erosion style clipping and validated again during placement with explicit overlap/outside checks.
 - Repeated identical parts reuse cached shape-pair NFP geometry keyed by full polygon identity plus rotation, while each placed instance still contributes its own translated exclusion region during placement.
+- Bitmap mode also reuses rasterized masks for identical geometry+rotation.

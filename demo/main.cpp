@@ -4,7 +4,9 @@
 #include "deepnestcpp/orchestrator.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +15,14 @@
 using namespace deepnest;
 
 namespace {
+
+const char* algorithmName(NestingAlgorithm algorithm) {
+  return algorithm == NestingAlgorithm::Bitmap ? "bitmap" : "nfp";
+}
+
+void printTimingLine(const char* label, double ms) {
+  std::cout << std::fixed << std::setprecision(3) << label << ": " << ms << " ms (" << (ms / 1000.0) << " s)\n";
+}
 
 size_t countPlacedParts(const PlacementResult& result) {
   size_t placed = 0;
@@ -64,13 +74,14 @@ class StdoutSink : public EventSink {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const auto appStart = std::chrono::steady_clock::now();
   std::vector<std::string_view> args;
   args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
   for (int i = 1; i < argc; ++i) {
     args.emplace_back(argv[i]);
   }
 
-  DemoCliOptions options{kDefaultDemoPartCount, defaultWorkerCount(), std::nullopt, false};
+  DemoCliOptions options{kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, std::nullopt, false};
   try {
     options = parseDemoCliOptions(args);
   } catch (const std::exception& ex) {
@@ -79,12 +90,15 @@ int main(int argc, char** argv) {
   }
 
   if (options.showHelp) {
-    std::cout << "Usage: deepnestcpp_demo [--count <N>] [--threads <N>] [--output <path>] [--help]\n"
+    std::cout << "Usage: deepnestcpp_demo [--count <N>] [--threads <N>] [--algorithm nfp|bitmap]\n"
+                 "                        [--bitmap-resolution <mm-per-pixel>] [--output <path>] [--help]\n"
               << "  --count <N>     Number of identical star parts to generate (default "
               << kDefaultDemoPartCount << ")\n"
               << "  --threads <N>   Worker count for independent NFP precompute (default "
               << defaultWorkerCount() << ")\n"
-              << "  --output <path> Export placed parts and the 2000x2800 mm sheet to DXF\n";
+              << "  --algorithm     Nesting algorithm: nfp or bitmap (default nfp)\n"
+              << "  --bitmap-resolution <mm-per-pixel> Raster resolution for bitmap nesting (default 1.0)\n"
+              << "  --output <path> Export placed parts and the 1500x1500 mm sheet to DXF\n";
     return 0;
   }
 
@@ -93,6 +107,8 @@ int main(int argc, char** argv) {
   req.config.placementType = "box";
   req.config.rotations = 4;
   req.config.threads = options.threads;
+  req.config.algorithm = options.algorithm;
+  req.config.bitmapResolutionMm = options.bitmapResolutionMm;
   req.individual.placement = makeDemoStarParts(options.count);
   req.individual.rotation.assign(req.individual.placement.size(), 0.0);
   req.ids.reserve(req.individual.placement.size());
@@ -145,11 +161,16 @@ int main(int argc, char** argv) {
   StdoutSink sink;
   sink.setWorkerCount(req.config.threads);
   BackgroundOrchestrator orchestrator;
-  auto result = orchestrator.run(req, sink);
+  auto runStats = orchestrator.runWithStats(req, sink);
+  auto& result = runStats.placement;
 
   if (options.outputPath.has_value()) {
     try {
+      const auto dxfStart = std::chrono::steady_clock::now();
       exportPlacementResultToDxf(*options.outputPath, sourceSheets, sourceParts, result);
+      const auto dxfEnd = std::chrono::steady_clock::now();
+      runStats.timings.dxfExportMs =
+          std::chrono::duration<double, std::milli>(dxfEnd - dxfStart).count();
       std::cout << "DXF exported to: " << std::filesystem::absolute(*options.outputPath).string() << "\n";
     } catch (const std::exception& ex) {
       std::cerr << "Failed to export DXF: " << ex.what() << "\n";
@@ -158,8 +179,24 @@ int main(int argc, char** argv) {
   }
 
   const size_t placedCount = countPlacedParts(result);
+  std::cout << "algorithm: " << algorithmName(options.algorithm) << "\n";
+  std::cout << "sheet size: " << kDemoSheetWidthMm << "x" << kDemoSheetHeightMm << " mm\n";
+  std::cout << "part count: " << options.count << "\n";
+  std::cout << "workers: " << options.threads << "\n";
+  std::cout << "bitmap resolution: " << options.bitmapResolutionMm << " mm/pixel\n";
+  std::cout << "bitmap SIMD backend: " << runStats.simdBackend << "\n";
   std::cout << "placed parts: " << placedCount << "\n";
   std::cout << "unplaced parts: " << result.unplaced.size() << "\n";
   std::cout << "placed sheets: " << result.placements.size() << "\n";
+  std::cout << "utilisation: " << result.utilisation << "%\n";
+  printTimingLine("timing.setup", runStats.timings.setupMs);
+  printTimingLine("timing.nfp_precompute", runStats.timings.nfpPrecomputeMs);
+  printTimingLine("timing.placement", runStats.timings.placementMs);
+  printTimingLine("timing.bitmap", runStats.timings.bitmapMs);
+  printTimingLine("timing.dxf_export", runStats.timings.dxfExportMs);
+  printTimingLine("timing.orchestrator_total", runStats.timings.totalMs);
+  const double appTotalMs =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - appStart).count();
+  printTimingLine("timing.total_with_output", appTotalMs);
   return result.placements.empty() ? 1 : 0;
 }

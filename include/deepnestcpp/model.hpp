@@ -7,6 +7,8 @@
 
 namespace deepnest {
 
+enum class NestingAlgorithm { Nfp, Bitmap };
+
 inline int defaultWorkerCount() {
   const unsigned int detected = std::thread::hardware_concurrency();
   return detected == 0U ? 1 : static_cast<int>(detected);
@@ -48,6 +50,9 @@ struct Bounds {
 struct Config {
   int rotations{4};
   int threads{defaultWorkerCount()};
+  NestingAlgorithm algorithm{NestingAlgorithm::Nfp};
+  double bitmapResolutionMm{1.0};
+  bool bitmapPreferAvx2{true};
   double spacing{0.0};
   bool simplify{false};
   std::string placementType{"gravity"};
