@@ -1,7 +1,11 @@
+#include "deepnestcpp/demo_setup.hpp"
 #include "deepnestcpp/geometry.hpp"
+#include "deepnestcpp/orchestrator.hpp"
 #include "deepnestcpp/placement.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <unordered_map>
 
 using namespace deepnest;
 
@@ -20,6 +24,49 @@ std::vector<Polygon> makeParts() {
   p1.rotation = 0;
   p2.rotation = 0;
   return {p1, p2};
+}
+
+class NullSink : public EventSink {
+ public:
+  void onTestStart(const std::vector<Polygon>&, const std::vector<Polygon>&, const Config&, int) override {}
+  void onProgress(int, double) override {}
+  void onResult(const PlacementResult&) override {}
+};
+
+std::vector<Polygon> absolutePlacedPolygons(const PlacementResult& result, const std::vector<Polygon>& sourceParts) {
+  std::unordered_map<int, Polygon> partById;
+  for (const auto& part : sourceParts) {
+    if (part.id.has_value()) {
+      partById.emplace(*part.id, part);
+    }
+  }
+
+  std::vector<Polygon> absolute;
+  for (const auto& sheet : result.placements) {
+    for (const auto& placement : sheet.sheetplacements) {
+      REQUIRE(placement.id.has_value());
+      const auto it = partById.find(*placement.id);
+      REQUIRE(it != partById.end());
+      Polygon instance = it->second;
+      instance.rotation = placement.rotation;
+      absolute.push_back(shiftPolygon(rotatePolygon(instance, placement.rotation), {placement.x, placement.y, true}));
+    }
+  }
+  return absolute;
+}
+
+void requirePlacementValidity(const PlacementResult& result, const Polygon& sheet, const std::vector<Polygon>& sourceParts,
+                              const Config& cfg) {
+  const auto absolute = absolutePlacedPolygons(result, sourceParts);
+  REQUIRE_FALSE(absolute.empty());
+  for (const auto& polygon : absolute) {
+    REQUIRE_FALSE(hasMaterialOutsideSheet(polygon, sheet, cfg));
+  }
+  for (size_t i = 0; i < absolute.size(); ++i) {
+    for (size_t j = i + 1; j < absolute.size(); ++j) {
+      REQUIRE_FALSE(hasMaterialOverlap(absolute[i], absolute[j], cfg));
+    }
+  }
 }
 
 }  // namespace
@@ -87,4 +134,49 @@ TEST_CASE("identical parts reuse cached pair geometry without overlap") {
       REQUIRE_FALSE(hasMaterialOverlap(absolute[i], absolute[j], cfg));
     }
   }
+}
+
+TEST_CASE("threads 1 and multi-worker produce the same valid placements") {
+  Polygon sheet = makeDemoSheet();
+  const auto parts = makeDemoStarParts(8);
+
+  BackgroundRequest singleRequest;
+  singleRequest.index = 1;
+  singleRequest.config.placementType = "box";
+  singleRequest.config.rotations = 4;
+  singleRequest.config.threads = 1;
+  singleRequest.sheets = {sheet};
+  singleRequest.individual.placement = parts;
+  singleRequest.individual.rotation.assign(parts.size(), 0.0);
+
+  BackgroundRequest parallelRequest = singleRequest;
+  parallelRequest.config.threads = 4;
+
+  NullSink sink;
+  BackgroundOrchestrator singleOrchestrator;
+  BackgroundOrchestrator parallelOrchestrator;
+
+  const auto singleResult = singleOrchestrator.run(singleRequest, sink);
+  const auto parallelResult = parallelOrchestrator.run(parallelRequest, sink);
+
+  REQUIRE(singleResult.unplaced.empty());
+  REQUIRE(parallelResult.unplaced.empty());
+  REQUIRE(singleResult.placements.size() == parallelResult.placements.size());
+  REQUIRE(singleResult.placements.front().sheetplacements.size() == parallelResult.placements.front().sheetplacements.size());
+
+  const auto singleAbsolute = absolutePlacedPolygons(singleResult, parts);
+  const auto parallelAbsolute = absolutePlacedPolygons(parallelResult, parts);
+  REQUIRE(singleAbsolute.size() == parallelAbsolute.size());
+  for (size_t i = 0; i < singleAbsolute.size(); ++i) {
+    REQUIRE(singleResult.placements.front().sheetplacements[i].id == parallelResult.placements.front().sheetplacements[i].id);
+    REQUIRE(singleResult.placements.front().sheetplacements[i].rotation ==
+            Catch::Approx(parallelResult.placements.front().sheetplacements[i].rotation));
+    REQUIRE(singleResult.placements.front().sheetplacements[i].x ==
+            Catch::Approx(parallelResult.placements.front().sheetplacements[i].x).margin(1e-9));
+    REQUIRE(singleResult.placements.front().sheetplacements[i].y ==
+            Catch::Approx(parallelResult.placements.front().sheetplacements[i].y).margin(1e-9));
+  }
+
+  requirePlacementValidity(singleResult, sheet, parts, singleRequest.config);
+  requirePlacementValidity(parallelResult, sheet, parts, parallelRequest.config);
 }

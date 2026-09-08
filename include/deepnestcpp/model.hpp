@@ -2,9 +2,19 @@
 
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace deepnest {
+
+inline int defaultWorkerCount() {
+  const unsigned int detected = std::thread::hardware_concurrency();
+  return detected == 0U ? 1 : static_cast<int>(detected);
+}
+
+inline int normalizeWorkerCount(int requested) {
+  return requested >= 1 ? requested : 1;
+}
 
 struct Point {
   double x{0.0};
@@ -37,6 +47,7 @@ struct Bounds {
 
 struct Config {
   int rotations{4};
+  int threads{defaultWorkerCount()};
   double spacing{0.0};
   bool simplify{false};
   std::string placementType{"gravity"};
