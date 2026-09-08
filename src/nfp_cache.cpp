@@ -51,11 +51,21 @@ std::optional<std::vector<Polygon>> NfpCache::findInner(const NfpKey& key) const
 }
 
 void NfpCache::insertOuter(const NfpKey& key, const Polygon& nfp) {
+  ++outerStoreCount_;
   outer_[key] = nfp;
 }
 
 void NfpCache::insertInner(const NfpKey& key, const std::vector<Polygon>& nfp) {
+  ++innerStoreCount_;
   inner_[key] = nfp;
+}
+
+size_t NfpCache::outerStoreCount() const {
+  return outerStoreCount_;
+}
+
+size_t NfpCache::innerStoreCount() const {
+  return innerStoreCount_;
 }
 
 }  // namespace deepnest

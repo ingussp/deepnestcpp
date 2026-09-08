@@ -1,3 +1,4 @@
+#include "deepnestcpp/demo_setup.hpp"
 #include "deepnestcpp/dxf_export.hpp"
 #include "deepnestcpp/orchestrator.hpp"
 
@@ -5,17 +6,31 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 using namespace deepnest;
 
 namespace {
 
-Polygon rect(double x, double y, double w, double h, const std::string& src = "") {
-  Polygon p;
-  p.points = {{x, y, true}, {x + w, y, true}, {x + w, y + h, true}, {x, y + h, true}};
-  p.source = src;
-  return p;
+int parsePositiveCount(const std::string& value) {
+  try {
+    const int count = std::stoi(value);
+    if (count <= 0) {
+      throw std::invalid_argument("non-positive");
+    }
+    return count;
+  } catch (const std::exception&) {
+    throw std::invalid_argument("--count must be a positive integer");
+  }
+}
+
+size_t countPlacedParts(const PlacementResult& result) {
+  size_t placed = 0;
+  for (const auto& sheet : result.placements) {
+    placed += sheet.sheetplacements.size();
+  }
+  return placed;
 }
 
 class StdoutSink : public EventSink {
@@ -41,11 +56,28 @@ class StdoutSink : public EventSink {
 
 int main(int argc, char** argv) {
   std::optional<std::filesystem::path> outputPath;
+  int count = kDefaultDemoPartCount;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--help") {
-      std::cout << "Usage: deepnestcpp_demo [--output <path>] [--help]\n";
+      std::cout << "Usage: deepnestcpp_demo [--count <N>] [--output <path>] [--help]\n"
+                << "  --count <N>   Number of identical star parts to generate (default "
+                << kDefaultDemoPartCount << ")\n"
+                << "  --output <path> Export placed parts and the 2000x2800 mm sheet to DXF\n";
       return 0;
+    }
+    if (arg == "--count") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --count\n";
+        return 1;
+      }
+      try {
+        count = parsePositiveCount(argv[++i]);
+      } catch (const std::exception& ex) {
+        std::cerr << ex.what() << "\n";
+        return 1;
+      }
+      continue;
     }
     if (arg == "--output") {
       if (i + 1 >= argc) {
@@ -68,20 +100,21 @@ int main(int argc, char** argv) {
   req.index = 1;
   req.config.placementType = "box";
   req.config.rotations = 4;
+  req.individual.placement = makeDemoStarParts(count);
+  req.individual.rotation.assign(req.individual.placement.size(), 0.0);
+  req.ids.reserve(req.individual.placement.size());
+  req.sources.reserve(req.individual.placement.size());
+  req.children.resize(req.individual.placement.size());
+  req.filenames.reserve(req.individual.placement.size());
+  for (const auto& part : req.individual.placement) {
+    req.ids.push_back(part.id);
+    req.sources.push_back(part.source);
+    req.filenames.push_back(part.filename);
+  }
 
-  Polygon partA = rect(0, 0, 3, 3, "partA");
-  Polygon partB = rect(0, 0, 2, 2, "partB");
-
-  req.individual.placement = {partA, partB};
-  req.individual.rotation = {0, 0};
-  req.ids = {1, 2};
-  req.sources = {"partA", "partB"};
-  req.children = {{}, {}};
-  req.filenames = {"a.svg", "b.svg"};
-
-  req.sheets = {rect(0, 0, 10, 10, "sheet1")};
-  req.sheetids = {10};
-  req.sheetsources = {"sheet1"};
+  req.sheets = {makeDemoSheet()};
+  req.sheetids = {req.sheets.front().id};
+  req.sheetsources = {req.sheets.front().source};
   req.sheetchildren = {{}};
 
   auto sourceParts = req.individual.placement;
@@ -130,6 +163,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::cout << "final placed sheets: " << result.placements.size() << "\n";
+  const size_t placedCount = countPlacedParts(result);
+  std::cout << "placed parts: " << placedCount << "\n";
+  std::cout << "unplaced parts: " << result.unplaced.size() << "\n";
+  std::cout << "placed sheets: " << result.placements.size() << "\n";
   return result.placements.empty() ? 1 : 0;
 }

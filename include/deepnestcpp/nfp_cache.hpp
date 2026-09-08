@@ -2,6 +2,7 @@
 
 #include "deepnestcpp/model.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -29,10 +30,14 @@ class NfpCache {
   std::optional<std::vector<Polygon>> findInner(const NfpKey& key) const;
   void insertOuter(const NfpKey& key, const Polygon& nfp);
   void insertInner(const NfpKey& key, const std::vector<Polygon>& nfp);
+  size_t outerStoreCount() const;
+  size_t innerStoreCount() const;
 
  private:
   std::unordered_map<NfpKey, Polygon, NfpKeyHash> outer_;
   std::unordered_map<NfpKey, std::vector<Polygon>, NfpKeyHash> inner_;
+  size_t outerStoreCount_{0};
+  size_t innerStoreCount_{0};
 };
 
 }  // namespace deepnest

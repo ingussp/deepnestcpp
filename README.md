@@ -31,19 +31,32 @@ ctest --test-dir build --output-on-failure
 ## Run demo
 
 ```bash
-./build/deepnestcpp_demo
+./build/deepnestcpp_demo --count 20 --output /tmp/star-demo.dxf
 ```
 
-### Windows DXF export
+The demo uses the supplied `neregulara_zvaigzne.svg` path in **normalized local coordinates after applying the SVG group's `scale(1,-1)` flip**. The group translation is treated as SVG canvas placement and is not baked into the part, so the exported DXF remains in millimetres and contains the correct transformed outline for each placed copy.
+
+For a full run with 2,000 copies on one `2000 mm × 2800 mm` sheet:
+
+```bash
+./build/deepnestcpp_demo --count 2000 --output /tmp/star-demo-2000.dxf
+```
+
+The full nesting run can take noticeable time depending on hardware.
+
+### Windows build and DXF export
 
 ```powershell
-cd C:\dev\deepnestcpp\build\Debug
-deepnestcpp_demo.exe --output result.dxf
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+.\build\Release\deepnestcpp_demo.exe --count 20 --output result.dxf
+.\build\Release\deepnestcpp_demo.exe --count 2000 --output result-2000.dxf
 ```
 
-This creates `C:\dev\deepnestcpp\build\Debug\result.dxf`, which can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
+This creates DXF files in millimetres that can be opened in LibreCAD, QCAD, AutoCAD, or Fusion 360.
 
 ## Notes
 
 - Clipper2 is fetched with CMake `FetchContent` for reproducible setup.
 - Inner-NFP hole handling is implemented with polygon-material intersection/erosion style clipping and validated again during placement with explicit overlap/outside checks.
+- Repeated identical parts reuse cached shape-pair NFP geometry keyed by full polygon identity plus rotation, while each placed instance still contributes its own translated exclusion region during placement.

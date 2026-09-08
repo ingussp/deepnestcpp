@@ -7,6 +7,7 @@
 #include <clipper2/clipper.h>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 namespace deepnest {
 
@@ -39,6 +40,23 @@ Placement toPlacement(const Point& shift, const Polygon& part) {
   return p;
 }
 
+Bounds mergeBounds(const Bounds& a, const Bounds& b) {
+  const double minx = std::min(a.x, b.x);
+  const double miny = std::min(a.y, b.y);
+  const double maxx = std::max(a.x + a.width, b.x + b.width);
+  const double maxy = std::max(a.y + a.height, b.y + b.height);
+  return Bounds{minx, miny, maxx - minx, maxy - miny};
+}
+
+Paths64 forbiddenNfpToClipperCoordinates(const Polygon& nfp, const Config& config) {
+  Paths64 forbidden{outerPathToClipperCoordinates(nfp, config)};
+  auto holes = childPathsToClipperCoordinates(nfp, config);
+  if (!holes.empty()) {
+    forbidden = Difference(forbidden, holes, FillRule::NonZero);
+  }
+  return forbidden;
+}
+
 }  // namespace
 
 PlacementResult placeParts(std::vector<Polygon> sheets,
@@ -62,8 +80,16 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
 
   while (!parts.empty() && !sheets.empty()) {
     std::vector<Polygon> placed;
+    std::vector<Polygon> placedAbsolute;
     std::vector<Placement> placements;
     std::vector<size_t> placedIndices;
+    std::vector<Point> placedPoints;
+    Bounds placedBounds;
+    bool hasPlacedBounds = false;
+    // Cache per unique placed-shape/candidate-shape rotation pair on the current sheet.
+    // Every placed instance still contributes its own translated exclusion region, but we
+    // avoid rebuilding the same outer-NFP clipper geometry for identical copies.
+    std::unordered_map<NfpKey, Paths64, NfpKeyHash> forbiddenPairCache;
 
     Polygon sheet = sheets.front();
     sheets.erase(sheets.begin());
@@ -128,37 +154,44 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
         placements.push_back(*bestPosition);
         placed.push_back(part);
         placedIndices.push_back(i);
+        Polygon absolute = shiftPolygon(part, {bestPosition->x, bestPosition->y, true});
+        placedAbsolute.push_back(absolute);
+        if (config.placementType == "convexhull") {
+          placedPoints.insert(placedPoints.end(), absolute.points.begin(), absolute.points.end());
+        }
+        placedBounds = getPolygonBounds(absolute.points);
+        hasPlacedBounds = true;
         continue;
       }
 
       Paths64 finalNfp = innerNfpToClipperCoordinates(*sheetNfp, config);
       bool error = false;
+      Paths64 occupiedForbidden;
 
       for (size_t j = 0; j < placed.size(); ++j) {
-        auto nfpOpt = getOuterNfp(placed[j], part, false, config, cache);
-        if (!nfpOpt.has_value()) {
-          error = true;
-          break;
+        NfpKey pairKey{polygonGeometryIdentity(placed[j]), polygonGeometryIdentity(part), placed[j].rotation, part.rotation,
+                       false};
+        auto cacheIt = forbiddenPairCache.find(pairKey);
+        if (cacheIt == forbiddenPairCache.end()) {
+          auto nfpOpt = getOuterNfp(placed[j], part, false, config, cache);
+          if (!nfpOpt.has_value()) {
+            error = true;
+            break;
+          }
+          cacheIt = forbiddenPairCache.emplace(pairKey, forbiddenNfpToClipperCoordinates(*nfpOpt, config)).first;
         }
 
-        Polygon nfp = clonePolygonWithChildren(*nfpOpt);
-        Point pshift{placements[j].x, placements[j].y, true};
-        nfp = shiftPolygon(nfp, pshift);
-
-        Paths64 nextNfp = Difference(finalNfp, Paths64{outerPathToClipperCoordinates(nfp, config)}, FillRule::NonZero);
-
-        auto nfpChildren = childPathsToClipperCoordinates(nfp, config);
-        if (!nfpChildren.empty()) {
-          nextNfp = Union(nextNfp, nfpChildren, FillRule::NonZero);
-        }
-
-        finalNfp = std::move(nextNfp);
-        if (finalNfp.empty()) {
-          error = true;
-          break;
-        }
+        const int64_t dx = static_cast<int64_t>(std::llround(placements[j].x * config.clipperScale));
+        const int64_t dy = static_cast<int64_t>(std::llround(placements[j].y * config.clipperScale));
+        auto translated = translatePaths(cacheIt->second, dx, dy);
+        occupiedForbidden.insert(occupiedForbidden.end(), translated.begin(), translated.end());
       }
 
+      // Subtract all translated forbidden regions in one clipper call. This preserves
+      // correctness while avoiding repeated Difference/Union passes for identical copies.
+      if (!error && !occupiedForbidden.empty()) {
+        finalNfp = Difference(finalNfp, occupiedForbidden, FillRule::NonZero);
+      }
       if (error || finalNfp.empty()) {
         continue;
       }
@@ -180,21 +213,14 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
       std::optional<double> localMinArea;
       std::optional<double> localMinX;
 
-      std::vector<Point> allpoints;
-      for (size_t pidx = 0; pidx < placed.size(); ++pidx) {
-        for (const auto& pt : placed[pidx].points) {
-          allpoints.push_back({pt.x + placements[pidx].x, pt.y + placements[pidx].y, true});
-        }
-      }
-
       Bounds allbounds;
       Bounds partbounds;
       std::vector<Point> hull;
       if (config.placementType == "gravity" || config.placementType == "box") {
-        allbounds = getPolygonBounds(allpoints);
+        allbounds = hasPlacedBounds ? placedBounds : Bounds{};
         partbounds = getPolygonBounds(part.points);
-      } else if (config.placementType == "convexhull" && !allpoints.empty()) {
-        hull = getHull(allpoints);
+      } else if (config.placementType == "convexhull" && !placedPoints.empty()) {
+        hull = getHull(placedPoints);
       }
 
       for (const auto& region : validRegions) {
@@ -228,7 +254,7 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
             for (const auto& pt : part.points) {
               partPoints.push_back({pt.x + shift.x, pt.y + shift.y, true});
             }
-            std::vector<Point> combined = allpoints.empty() ? partPoints : hull;
+            std::vector<Point> combined = placedPoints.empty() ? partPoints : hull;
             combined.insert(combined.end(), partPoints.begin(), partPoints.end());
             auto combinedHull = getHull(combined);
             if (combinedHull.empty()) {
@@ -239,13 +265,8 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
 
           if (config.mergeLines) {
             Polygon shiftedPart = shiftPolygon(part, shift);
-            std::vector<Polygon> shiftedPlaced;
-            shiftedPlaced.reserve(placed.size());
-            for (size_t m = 0; m < placed.size(); ++m) {
-              shiftedPlaced.push_back(shiftPolygon(placed[m], {placements[m].x, placements[m].y, true}));
-            }
             const double minlength = 0.5 * config.scale;
-            auto merged = mergedLength(shiftedPlaced, shiftedPart, minlength, 0.1 * config.curveTolerance);
+            auto merged = mergedLength(placedAbsolute, shiftedPart, minlength, 0.1 * config.curveTolerance);
             areaScore -= merged.totalLength * config.timeRatio;
             candidate.mergedLength = merged.totalLength;
             candidate.mergedSegments = merged.segments;
@@ -265,8 +286,7 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
             Polygon testShifted = shiftPolygon(part, shift);
             bool overlapping = hasMaterialOutsideSheet(testShifted, sheet, config);
             for (size_t m = 0; !overlapping && m < placed.size(); ++m) {
-              Polygon already = shiftPolygon(placed[m], {placements[m].x, placements[m].y, true});
-              if (hasMaterialOverlap(testShifted, already, config)) {
+              if (hasMaterialOverlap(testShifted, placedAbsolute[m], config)) {
                 overlapping = true;
               }
             }
@@ -285,6 +305,14 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
         placed.push_back(part);
         placements.push_back(*bestPosition);
         placedIndices.push_back(i);
+        Polygon absolute = shiftPolygon(part, {bestPosition->x, bestPosition->y, true});
+        placedAbsolute.push_back(absolute);
+        if (config.placementType == "convexhull") {
+          placedPoints.insert(placedPoints.end(), absolute.points.begin(), absolute.points.end());
+        }
+        const Bounds absoluteBounds = getPolygonBounds(absolute.points);
+        placedBounds = hasPlacedBounds ? mergeBounds(placedBounds, absoluteBounds) : absoluteBounds;
+        hasPlacedBounds = true;
         totalMerged += bestPosition->mergedLength;
         minwidth = localMinWidth.value_or(0.0);
         minarea = localMinArea.value_or(0.0);

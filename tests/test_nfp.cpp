@@ -37,3 +37,18 @@ TEST_CASE("inner NFP exists for fit and hole-aware material") {
   REQUIRE(inner.has_value());
   REQUIRE_FALSE(inner->empty());
 }
+
+TEST_CASE("preprocessMissingPairs collapses identical geometry copies") {
+  NfpCache cache;
+
+  Polygon repeated = rect(0, 0, 2, 2, "duplicate");
+  repeated.geometryKey = "rect:2x2";
+  repeated.rotation = 0.0;
+
+  std::vector<Polygon> parts(4, repeated);
+  auto pairs = preprocessMissingPairs(parts, cache);
+
+  REQUIRE(pairs.size() == 1);
+  REQUIRE(pairs.front().A.source == "duplicate");
+  REQUIRE(pairs.front().B.source == "duplicate");
+}

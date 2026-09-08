@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <sstream>
 
 namespace deepnest {
 
@@ -19,6 +20,24 @@ static Path64 translatePath(const Path64& path, int64_t dx, int64_t dy) {
     out.push_back(Point64{p.x + dx, p.y + dy});
   }
   return out;
+}
+
+long long geometryCoordKey(double v) {
+  return static_cast<long long>(std::llround(v * 1000000.0));
+}
+
+void appendPolygonGeometrySignature(const Polygon& polygon,
+                                    const Point& origin,
+                                    std::ostringstream& out) {
+  out << "p(";
+  for (const auto& point : polygon.points) {
+    out << geometryCoordKey(point.x - origin.x) << ',' << geometryCoordKey(point.y - origin.y) << ';';
+  }
+  out << ")c[" << polygon.children.size() << ':';
+  for (const auto& child : polygon.children) {
+    appendPolygonGeometrySignature(child, origin, out);
+  }
+  out << ']';
 }
 
 }  // namespace
@@ -67,6 +86,19 @@ Bounds getPolygonBounds(const std::vector<Point>& path) {
   b.width = maxx - minx;
   b.height = maxy - miny;
   return b;
+}
+
+std::string polygonGeometryIdentity(const Polygon& polygon) {
+  if (!polygon.geometryKey.empty()) {
+    return polygon.geometryKey;
+  }
+  if (polygon.points.empty()) {
+    return "empty";
+  }
+
+  std::ostringstream out;
+  appendPolygonGeometrySignature(polygon, polygon.points.front(), out);
+  return out.str();
 }
 
 Polygon shiftPolygon(const Polygon& p, const Point& shift) {
@@ -200,6 +232,15 @@ std::vector<Path64> childPathsToClipperCoordinates(const Polygon& polygon, const
     children.push_back(toClipperCoordinates(child, config.clipperScale));
   }
   return children;
+}
+
+Paths64 translatePaths(const Paths64& paths, int64_t dx, int64_t dy) {
+  Paths64 translated;
+  translated.reserve(paths.size());
+  for (const auto& path : paths) {
+    translated.push_back(translatePath(path, dx, dy));
+  }
+  return translated;
 }
 
 std::vector<Path64> nfpToClipperCoordinates(const Polygon& nfp, const Config& config) {

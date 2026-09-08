@@ -24,6 +24,7 @@ struct Polygon {
   std::optional<int> id;
   std::string source;
   std::string filename;
+  std::string geometryKey;
   double rotation{0.0};
 };
 
